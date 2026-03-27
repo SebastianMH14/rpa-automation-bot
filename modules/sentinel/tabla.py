@@ -3,6 +3,7 @@ import os
 import time
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
 
 from config.settings import (
     CEDULAS_PRUEBA,
@@ -85,172 +86,154 @@ def _abrir_informe(driver, wait, row) -> bool:
 # ---------------------------------------------------------------------------
 
 def procesar_tabla_sentinel(driver, wait) -> list[dict]:
-    """
-    Recorre todas las páginas de la tabla de Sentinel, descarga los PDFs
-    de los pacientes que aplican y devuelve la lista de metadatos.
-
-    En modo PRUEBA (CEDULAS_PRUEBA no vacío) se detiene en cuanto encuentra
-    todas las cédulas del conjunto.
-
-    Returns:
-        Lista de dicts con claves: ruta, nombre, cedula, examen, fecha_atencion.
-    """
     pdfs_descargados: list[dict] = []
-    cedulas_encontradas: set[str] = set()
-    pagina = 1
-    total_procesadas = 0
-    total_omitidas = 0
     modo_prueba = bool(CEDULAS_PRUEBA)
 
-    while True:
-        logger.info("─" * 50)
-        logger.info("📄 Procesando página %d", pagina)
-
-        wait.until(EC.presence_of_element_located((By.XPATH, "//rows/row")))
-        time.sleep(2)
-
-        total_filas = len(driver.find_elements(By.XPATH, "//rows/row"))
-        logger.info("Filas encontradas en página %d: %d", pagina, total_filas)
-
-        i = 0
-        while i < total_filas:
-            try:
-                rows = driver.find_elements(By.XPATH, "//rows/row")
-                if i >= len(rows):
-                    logger.warning(
-                        "⚠ Fila %d no disponible (total actual: %d)", i, len(rows))
-                    break
-
-                row = rows[i]
-                cells = row.find_elements(By.XPATH, "./cell")
-
-                if len(cells) < 19:
-                    logger.debug(
-                        "Fila %d omitida: solo %d celdas", i, len(cells))
-                    total_omitidas += 1
-                    i += 1
-                    continue
-
-                cedula = cells[8].text.strip().rstrip(".")
-                nombre = cells[9].text.strip()
-                fecha_atencion = cells[11].text.strip()
-
-                logger.debug("Revisando fila %d | %s | %s | %s",
-                             i, cedula, nombre, fecha_atencion)
-
-                # --- Filtro modo prueba ---
-                if modo_prueba and cedula not in CEDULAS_PRUEBA:
-                    total_omitidas += 1
-                    i += 1
-                    continue
-
-                if modo_prueba:
-                    logger.info("🎯 Cédula de prueba encontrada: %s | %s | %s",
-                                cedula, nombre, fecha_atencion)
-                    cedulas_encontradas.add(cedula)
-                    if cedulas_encontradas == CEDULAS_PRUEBA:
-                        logger.info("✅ Todas las cédulas de prueba encontradas (%d/%d)",
-                                    len(cedulas_encontradas), len(CEDULAS_PRUEBA))
-                        return pdfs_descargados
-
-                # --- Tipo de examen ---
-                examen_raw = cells[18].get_attribute("tooltip") or ""
-                examen = MAPEO_TIPOS_EXAMEN.get(examen_raw.strip().lower(), "")
-                logger.debug("Examen | Raw: '%s' → '%s'",
-                             examen_raw, examen or "(sin mapeo)")
-
-                # --- Estado ---
-                estado = next(
-                    (cell.text.strip().upper()
-                     for cell in cells
-                     if cell.text.strip().upper() in ("CONFIRMADO", "RECONFIRMADO")),
-                    None,
-                )
-
-                logger.info(
-                    "Fila | %s | %s | examen: %s | fecha: %s | estado: %s",
-                    nombre, cedula, examen or "(vacío)", fecha_atencion, estado or "(sin estado)",
-                )
-
-                if estado not in ("CONFIRMADO", "RECONFIRMADO"):
-                    logger.info("⏭ Omitida: estado '%s'", estado)
-                    total_omitidas += 1
-                    i += 1
-                    continue
-
-                # --- Abrir informe ---
-                total_procesadas += 1
-                _abrir_informe(driver, wait, row)
-
-                # --- Firmante ---
-                firmante = _obtener_firmante(driver)
-                if not firmante:
-                    logger.warning(
-                        "⚠ Sin firmante confirmado para %s | %s", nombre, cedula)
-
-                # --- Rutas ---
-                nombre_archivo = f"{cedula}_{nombre}".replace(
-                    " ", "_") + ".pdf"
-                carpeta_medico = firmante.replace(
-                    " ", "_") if firmante else "SIN_FIRMANTE"
-                carpeta_destino = os.path.join(DOWNLOAD_DIR, carpeta_medico)
-                os.makedirs(carpeta_destino, exist_ok=True)
-                ruta_pdf = os.path.join(carpeta_destino, nombre_archivo)
-
-                # --- Descarga ---
-                if not descargar_pdf_desde_iframe(driver, ruta_pdf):
-                    logger.warning(
-                        "⚠ PDF no descargado para %s | %s", nombre, cedula)
-
-                pdfs_descargados.append({
-                    "ruta": ruta_pdf,
-                    "nombre": nombre_archivo,
-                    "cedula": cedula,
-                    "examen": examen,
-                    "fecha_atencion": fecha_atencion,
-                })
-
-                break
-
-                # --- Volver a la tabla ---
-                driver.back()
-                wait.until(EC.presence_of_element_located(
-                    (By.XPATH, "//rows/row")))
-                wait.until(lambda d: len(
-                    d.find_elements(By.XPATH, "//rows/row")) > i)
-
-            except Exception as e:
-                logger.error("❌ Error en fila %d página %d: %s",
-                             i, pagina, e, exc_info=True)
-
-            finally:
-                i += 1
-
-        logger.info(
-            "Página %d completada | Procesadas: %d | Omitidas: %d | PDFs: %d",
-            pagina, total_procesadas, total_omitidas, len(pdfs_descargados),
-        )
-
-        # --- Paginación ---
-        try:
-            next_btn = driver.find_element(By.CSS_SELECTOR, "span.nextPage")
-            if "disabled" in next_btn.get_attribute("class"):
-                logger.info("📄 Última página alcanzada")
-                break
-            logger.info("➡ Avanzando a página %d", pagina + 1)
-            driver.execute_script("arguments[0].click();", next_btn)
-            pagina += 1
-            time.sleep(3)
-        except Exception as e:
-            logger.warning("⚠ No se pudo avanzar de página: %s", e)
-            break
+    if modo_prueba:
+        logger.info("🎯 Modo prueba: buscando %d cédulas directamente | %s",
+                    len(CEDULAS_PRUEBA), CEDULAS_PRUEBA)
+        for cedula in CEDULAS_PRUEBA:
+            logger.info("🔍 Buscando cédula: %s", cedula)
+            _buscar_cedula(driver, wait, cedula)
+            pdfs = _procesar_paginas(driver, wait, cedula_filtro=cedula)
+            pdfs_descargados.extend(pdfs)
+            logger.info("✅ Cédula %s | PDFs descargados: %d",
+                        cedula, len(pdfs))
+    else:
+        pdfs_descargados = _procesar_paginas(driver, wait)
 
     logger.info("=" * 60)
-    logger.info(
-        "📊 RESUMEN SENTINEL | Páginas: %d | PDFs: %d | Cédulas: %d/%d",
-        pagina, len(pdfs_descargados),
-        len(cedulas_encontradas), len(
-            CEDULAS_PRUEBA) if modo_prueba else total_procesadas,
-    )
+    logger.info("📊 RESUMEN SENTINEL | PDFs totales: %d", len(pdfs_descargados))
     logger.info("=" * 60)
     return pdfs_descargados
+
+
+def _buscar_cedula(driver, wait, cedula: str) -> None:
+    """Escribe la cédula en el buscador y ejecuta la búsqueda."""
+    input_busqueda = wait.until(
+        EC.presence_of_element_located((By.ID, "Criterion_Id"))
+    )
+    input_busqueda.clear()
+    input_busqueda.send_keys(cedula)
+    input_busqueda.send_keys(Keys.ENTER)
+    wait.until(
+        EC.text_to_be_present_in_element(
+            (By.XPATH, "//rows/row[1]/cell[9]"), cedula
+        )
+    )
+    logger.debug("🔎 Búsqueda ejecutada para cédula: %s", cedula)
+
+
+def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[dict]:
+    """
+    Procesa filas visibles. 
+    Si cedula_filtro está presente, solo procesa la PRIMERA fila válida y retorna.
+    """
+    pdfs: list[dict] = []
+    total_omitidas = 0
+    # ← en búsqueda directa, solo 1 resultado
+    modo_una_sola = cedula_filtro is not None
+
+    rows = driver.find_elements(By.XPATH, "//rows/row")
+    logger.info("Filas visibles: %d", len(rows))
+
+    i = 0
+    while i < len(rows):
+        try:
+            rows = driver.find_elements(By.XPATH, "//rows/row")
+            if i >= len(rows):
+                break
+
+            row = rows[i]
+            cells = row.find_elements(By.XPATH, "./cell")
+
+            if len(cells) < 19:
+                logger.debug("Fila %d omitida: solo %d celdas", i, len(cells))
+                total_omitidas += 1
+                i += 1
+                continue
+
+            cedula = cells[8].text.strip().rstrip(".")
+            nombre = cells[9].text.strip()
+            fecha_atencion = cells[11].text.strip()
+
+            if cedula_filtro and cedula != cedula_filtro:
+                print(
+                    f"⏭ Fila {i} omitida: cédula '{cedula}' no coincide con filtro '{cedula_filtro}'")
+                total_omitidas += 1
+                i += 1
+                continue
+
+            examen_raw = cells[18].get_attribute("tooltip") or ""
+            examen = MAPEO_TIPOS_EXAMEN.get(examen_raw.strip().lower(), "")
+            if not examen:
+                logger.warning(
+                    "⚠ Sin mapeo para examen: '%s' | %s", examen_raw, cedula)
+
+            estado = next(
+                (cell.text.strip().upper()
+                 for cell in cells
+                 if cell.text.strip().upper() in ("CONFIRMADO", "RECONFIRMADO")),
+                None,
+            )
+
+            logger.info("Fila | %s | %s | examen: %s | fecha: %s | estado: %s",
+                        nombre, cedula, examen or "(vacío)", fecha_atencion, estado or "(sin estado)")
+
+            if estado not in ("CONFIRMADO", "RECONFIRMADO"):
+                logger.info("⏭ Omitida: estado '%s'", estado)
+                total_omitidas += 1
+                i += 1
+                # En modo búsqueda directa, si esta fila no aplica tampoco seguimos
+                if modo_una_sola:
+                    logger.info(
+                        "⏭ Modo búsqueda: sin resultado válido para cédula %s", cedula_filtro)
+                    break
+                continue
+
+            _abrir_informe(driver, wait, row)
+
+            firmante = _obtener_firmante(driver)
+            if not firmante:
+                logger.warning(
+                    "⚠ Sin firmante confirmado para %s | %s", nombre, cedula)
+
+            nombre_archivo = f"{cedula}_{nombre}".replace(" ", "_") + ".pdf"
+            carpeta_medico = firmante.replace(
+                " ", "_") if firmante else "SIN_FIRMANTE"
+            carpeta_destino = os.path.join(DOWNLOAD_DIR, carpeta_medico)
+            os.makedirs(carpeta_destino, exist_ok=True)
+            ruta_pdf = os.path.join(carpeta_destino, nombre_archivo)
+
+            if not descargar_pdf_desde_iframe(driver, ruta_pdf):
+                logger.warning(
+                    "⚠ PDF no descargado para %s | %s", nombre, cedula)
+
+            pdfs.append({
+                "ruta": ruta_pdf,
+                "nombre": nombre_archivo,
+                "cedula": cedula,
+                "examen": examen,
+                "fecha_atencion": fecha_atencion,
+            })
+
+            driver.back()
+            wait.until(EC.presence_of_element_located(
+                (By.XPATH, "//rows/row")))
+
+            # ← En modo búsqueda directa: procesar solo este resultado y salir
+            if modo_una_sola:
+                logger.info(
+                    "✅ Modo búsqueda: primer resultado procesado para cédula %s", cedula_filtro)
+                break
+
+            wait.until(lambda d: len(d.find_elements(
+                By.XPATH, "//rows/row")) >= len(pdfs) + total_omitidas)
+
+        except Exception as e:
+            logger.error("❌ Error en fila %d: %s", i, e, exc_info=True)
+        finally:
+            i += 1
+
+    logger.info("Procesadas: %d | Omitidas: %d", len(pdfs), total_omitidas)
+    return pdfs

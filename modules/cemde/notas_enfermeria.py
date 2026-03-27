@@ -55,8 +55,8 @@ def obtener_numero_sentinel(driver, wait, fecha_busqueda: str, tipo_examen: str)
     Returns:
         El número Sentinel como string, o None si no se encontró.
     """
-    if tipo_examen not in ("HOLTER", "MAPA"):
-        return None
+    # if tipo_examen not in ("HOLTER", "MAPA"):
+    #     return None
 
     logger.debug(
         "Buscando nota de enfermería para examen tipo %s", tipo_examen)
@@ -125,6 +125,13 @@ def obtener_numero_sentinel(driver, wait, fecha_busqueda: str, tipo_examen: str)
             By.CLASS_NAME, "observaciones_nota_enfermeria"
         ).text
 
+        diagnostico_raw = driver.find_element(
+            By.XPATH,  "//th[contains(text(),'Diagnóstico Principal')]/following-sibling::td//textarea").get_attribute("value").strip()
+
+        codigo_diagnostico = diagnostico_raw.split("-")[0].strip()
+
+        logger.info("🧾 Diagnóstico extraído: %s", codigo_diagnostico)
+
         _cerrar_y_volver(driver, ventana_principal)
 
         match = re.search(r"SENTINEL\s*#\s*(\d+)",
@@ -132,7 +139,7 @@ def obtener_numero_sentinel(driver, wait, fecha_busqueda: str, tipo_examen: str)
         if match:
             numero = match.group(1)
             logger.info("🔢 Número Sentinel extraído: %s", numero)
-            return numero
+            return {"numero_sentinel": numero, "codigo_diagnostico": codigo_diagnostico}
 
         logger.warning("⚠ No se encontró número Sentinel en las observaciones")
         return None  # nota correcta pero sin número → no seguir buscando

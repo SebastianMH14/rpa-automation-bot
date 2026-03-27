@@ -4,7 +4,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 
 from config.settings import SERVICIOS_EXAMEN, SERVICIO_DEFAULT
-from modules.cemde.paciente import abrir_paciente, obtener_sede
+from modules.cemde.paciente import abrir_paciente, obtener_sede, seleccionar_sede
 from modules.cemde.notas_enfermeria import obtener_numero_sentinel
 from utils.select2 import buscar_opcion_select
 from utils.fecha import fecha_solo_dia, sentinel_a_input
@@ -39,7 +39,60 @@ def _abrir_formulario_otros_ad(driver, wait) -> None:
     logger.debug("Formulario de ayuda diagnóstica abierto")
 
 
-def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None) -> None:
+def _verificar_y_completar_diagnostico(driver, wait, codigo_diagnostico: str | None) -> None:
+    """
+    Verifica si el select2 de diagnóstico ya tiene una opción seleccionada.
+    Si no tiene nada y se dispone de codigo_diagnostico, lo busca y selecciona.
+    """
+    try:
+        select_diag = driver.find_element(By.ID, "diagnostico")
+        opciones_seleccionadas = select_diag.find_elements(
+            By.CSS_SELECTOR, "option[selected]"
+        )
+
+        if opciones_seleccionadas:
+            logger.debug(
+                "✔ Diagnóstico ya seleccionado: '%s'",
+                opciones_seleccionadas[0].text
+            )
+            return
+
+        # No hay nada seleccionado
+        if not codigo_diagnostico:
+            logger.warning(
+                "⚠ Diagnóstico vacío y no se dispone de codigo_diagnostico")
+            return
+
+        logger.debug("Diagnóstico vacío. Buscando código: '%s'",
+                     codigo_diagnostico)
+
+        # Buscar usando el input de Select2
+        search_input = wait.until(
+            EC.presence_of_element_located((
+                By.CSS_SELECTOR,
+                "#diagnostico + .select2-container .select2-search__field"
+            ))
+        )
+        search_input.click()
+        # Mínimo 3 chars para sugerir
+        search_input.send_keys(codigo_diagnostico[:4])
+        time.sleep(1.5)  # Esperar que carguen las sugerencias
+
+        # Esperar y seleccionar la primera opción que contenga el código
+        resultado = wait.until(
+            EC.element_to_be_clickable((
+                By.XPATH,
+                f"//li[contains(@class,'select2-results__option') and contains(., '{codigo_diagnostico}')]"
+            ))
+        )
+        resultado.click()
+        logger.debug("✔ Diagnóstico seleccionado: '%s'", resultado.text)
+
+    except Exception as e:
+        logger.error("❌ Error al completar diagnóstico: %s", e)
+
+
+def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None, codigo_diagnostico: str | None, sede: str | None) -> None:
     """
     Rellena todos los campos del formulario de carga de ayuda diagnóstica
     y lo envía.
@@ -47,6 +100,8 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None) 
     Args:
         pdf             : dict con claves examen, fecha_atencion, ruta.
         sentinel_numero : número Sentinel extraído de la nota de enfermería (puede ser None).
+        codigo_diagnostico : código de diagnóstico extraído de la nota de enfermería (puede ser None).
+        sede            : nombre de la sede a seleccionar (puede ser None).
     """
     tipo_examen = pdf["examen"]
     fecha_atencion = pdf["fecha_atencion"]
@@ -56,6 +111,12 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None) 
     service = SERVICIOS_EXAMEN.get(tipo_examen, SERVICIO_DEFAULT)
     logger.debug("Servicio a seleccionar: '%s' | Fecha examen: %s",
                  service, date_examen)
+
+    # seleccionar
+    sede_selected = seleccionar_sede(driver, wait, sede)
+
+    if not sede_selected:
+        logger.warning("⚠ No se pudo seleccionar la sede '%s'. Continuando sin seleccionar sede.", sede)
 
     # 1. Planilla de ingreso (servicio + fecha)
     if not buscar_opcion_select(driver, "planilla_ingreso", service, fecha_buscar=date_examen):
@@ -120,8 +181,10 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None) 
     )
     marcar_radio(driver, input_radio, ins_si)
 
+    # 9. Diagnóstico (si aplica y no está prellenado)
+    _verificar_y_completar_diagnostico(driver, wait, codigo_diagnostico)
 
-    # 9. Guardar
+    # 10. Guardar
     btn_guardar = driver.find_element(
         By.CSS_SELECTOR, "input[type='submit'].btn.green")
     btn_guardar.click()
@@ -165,16 +228,22 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
             abrir_paciente(driver, wait, cedula)
 
             # 2. Obtener sede (informativo, puede usarse para validaciones futuras)
-            obtener_sede(driver, wait, fecha_busqueda)
+            sede = obtener_sede(driver, wait, fecha_busqueda)
+            if not sede:
+                logger.warning("⚠ No se pudo determinar la sede del paciente")
 
             # 3. Número Sentinel desde nota de enfermería (solo HOLTER / MAPA)
-            sentinel_numero = obtener_numero_sentinel(
+            sentinel_data = obtener_numero_sentinel(
                 driver, wait, fecha_busqueda, tipo_examen
             )
 
+            sentinel_numero = sentinel_data["numero_sentinel"] if sentinel_data else None
+            codigo_diagnostico = sentinel_data["codigo_diagnostico"] if sentinel_data else None
+
             # 4. Navegar al formulario y completarlo
             _abrir_formulario_otros_ad(driver, wait)
-            _completar_formulario(driver, wait, pdf, sentinel_numero)
+            _completar_formulario(
+                driver, wait, pdf, sentinel_numero, codigo_diagnostico, sede)
 
             exitosos += 1
             logger.info(
