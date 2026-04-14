@@ -6,7 +6,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from config.settings import DOWNLOAD_DIR
 
 
-def crear_driver(timeout: int = 25) -> tuple[webdriver.Edge, WebDriverWait]:
+def crear_driver(timeout: int = 30) -> tuple[webdriver.Edge, WebDriverWait]:
     """
     Configura y devuelve (driver, wait) listos para usar.
 

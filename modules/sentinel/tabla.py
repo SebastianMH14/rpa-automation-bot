@@ -1,3 +1,4 @@
+from datetime import datetime
 import logging
 import os
 import time
@@ -9,10 +10,18 @@ from config.settings import (
     CEDULAS_PRUEBA,
     DOWNLOAD_DIR,
     MAPEO_TIPOS_EXAMEN,
+    FECHA_LIMITE
+
 )
 from modules.sentinel.pdf_downloader import descargar_pdf_desde_iframe
-
 logger = logging.getLogger("bot")
+
+if FECHA_LIMITE:
+    try:
+        FECHA_LIMITE = datetime.strptime(FECHA_LIMITE, "%d/%m/%Y")
+    except ValueError:
+        logger.error(
+            "❌ FECHA_LIMITE inválida: '%s'. Use DD/MM/YYYY.", FECHA_LIMITE)
 
 
 # ---------------------------------------------------------------------------
@@ -125,115 +134,160 @@ def _buscar_cedula(driver, wait, cedula: str) -> None:
 
 
 def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[dict]:
-    """
-    Procesa filas visibles. 
-    Si cedula_filtro está presente, solo procesa la PRIMERA fila válida y retorna.
-    """
     pdfs: list[dict] = []
     total_omitidas = 0
-    # ← en búsqueda directa, solo 1 resultado
+    pagina = 1
+
     modo_una_sola = cedula_filtro is not None
 
-    rows = driver.find_elements(By.XPATH, "//rows/row")
-    logger.info("Filas visibles: %d", len(rows))
+    while True:
+        logger.info("─" * 50)
+        logger.info("📄 Procesando página %d", pagina)
 
-    i = 0
-    while i < len(rows):
-        try:
-            rows = driver.find_elements(By.XPATH, "//rows/row")
-            if i >= len(rows):
-                break
+        wait.until(EC.presence_of_element_located((By.XPATH, "//rows/row")))
+        rows = driver.find_elements(By.XPATH, "//rows/row")
 
-            row = rows[i]
-            cells = row.find_elements(By.XPATH, "./cell")
+        logger.info("Filas visibles: %d", len(rows))
 
-            if len(cells) < 19:
-                logger.debug("Fila %d omitida: solo %d celdas", i, len(cells))
-                total_omitidas += 1
-                i += 1
-                continue
+        for i in range(len(rows)):
+            try:
+                # 🔥 CLAVE: refrescar filas cada vez (como tu función buena)
+                rows = driver.find_elements(By.XPATH, "//rows/row")
+                row = rows[i]
 
-            cedula = cells[8].text.strip().rstrip(".")
-            nombre = cells[9].text.strip()
-            fecha_atencion = cells[11].text.strip()
+                cells = row.find_elements(By.XPATH, "./cell")
 
-            if cedula_filtro and cedula != cedula_filtro:
-                print(
-                    f"⏭ Fila {i} omitida: cédula '{cedula}' no coincide con filtro '{cedula_filtro}'")
-                total_omitidas += 1
-                i += 1
-                continue
+                if len(cells) < 19:
+                    total_omitidas += 1
+                    continue
 
-            examen_raw = cells[18].get_attribute("tooltip") or ""
-            examen = MAPEO_TIPOS_EXAMEN.get(examen_raw.strip().lower(), "")
-            if not examen:
-                logger.warning(
-                    "⚠ Sin mapeo para examen: '%s' | %s", examen_raw, cedula)
+                cedula = cells[8].text.strip().rstrip(".")
+                nombre = cells[9].text.strip()
+                fecha_atencion = cells[11].text.strip()
 
-            estado = next(
-                (cell.text.strip().upper()
-                 for cell in cells
-                 if cell.text.strip().upper() in ("CONFIRMADO", "RECONFIRMADO")),
-                None,
-            )
+                if cedula_filtro and cedula != cedula_filtro:
+                    total_omitidas += 1
+                    continue
 
-            logger.info("Fila | %s | %s | examen: %s | fecha: %s | estado: %s",
-                        nombre, cedula, examen or "(vacío)", fecha_atencion, estado or "(sin estado)")
+                # 🔥 corte global por fecha (como querías)
+                if FECHA_LIMITE:
+                    try:
+                        fecha_dt = datetime.strptime(
+                            fecha_atencion, "%d/%m/%Y %H:%M:%S")
+                        if fecha_dt.date() < FECHA_LIMITE.date():
+                            logger.info(
+                                "🛑 Fecha límite alcanzada, deteniendo proceso")
+                            return pdfs
+                    except ValueError:
+                        total_omitidas += 1
+                        continue
 
-            if estado not in ("CONFIRMADO", "RECONFIRMADO"):
-                logger.info("⏭ Omitida: estado '%s'", estado)
-                total_omitidas += 1
-                i += 1
-                # En modo búsqueda directa, si esta fila no aplica tampoco seguimos
-                if modo_una_sola:
-                    logger.info(
-                        "⏭ Modo búsqueda: sin resultado válido para cédula %s", cedula_filtro)
-                    break
-                continue
+                examen_raw = cells[18].get_attribute("tooltip") or ""
+                examen = MAPEO_TIPOS_EXAMEN.get(examen_raw.strip().lower(), "")
 
-            _abrir_informe(driver, wait, row)
+                # 🔥 lógica robusta de estado
+                estado = None
+                for cell in cells:
+                    texto = (cell.text or "").strip().upper()
 
-            firmante = _obtener_firmante(driver)
-            if not firmante:
-                logger.warning(
-                    "⚠ Sin firmante confirmado para %s | %s", nombre, cedula)
+                    if texto == "CONFIRMADO":
+                        estado = "CONFIRMADO"
+                        break
+                    elif texto == "RECONFIRMADO":
+                        estado = "RECONFIRMADO"
+                        break
 
-            nombre_archivo = f"{cedula}_{nombre}".replace(" ", "_") + ".pdf"
-            carpeta_medico = firmante.replace(
-                " ", "_") if firmante else "SIN_FIRMANTE"
-            carpeta_destino = os.path.join(DOWNLOAD_DIR, carpeta_medico)
-            os.makedirs(carpeta_destino, exist_ok=True)
-            ruta_pdf = os.path.join(carpeta_destino, nombre_archivo)
-
-            if not descargar_pdf_desde_iframe(driver, ruta_pdf):
-                logger.warning(
-                    "⚠ PDF no descargado para %s | %s", nombre, cedula)
-
-            pdfs.append({
-                "ruta": ruta_pdf,
-                "nombre": nombre_archivo,
-                "cedula": cedula,
-                "examen": examen,
-                "fecha_atencion": fecha_atencion,
-            })
-
-            driver.back()
-            wait.until(EC.presence_of_element_located(
-                (By.XPATH, "//rows/row")))
-
-            # ← En modo búsqueda directa: procesar solo este resultado y salir
-            if modo_una_sola:
                 logger.info(
-                    "✅ Modo búsqueda: primer resultado procesado para cédula %s", cedula_filtro)
+                    "Fila | %s | %s | examen: %s | fecha: %s | estado: %s",
+                    nombre, cedula, examen or "(vacío)", fecha_atencion, estado or "(sin estado)"
+                )
+
+                if estado not in ("CONFIRMADO", "RECONFIRMADO"):
+                    total_omitidas += 1
+                    if modo_una_sola:
+                        return pdfs
+                    continue
+
+                # =========================
+                # 🔽 PROCESAMIENTO
+                # =========================
+                row.click()
+
+                wait.until(EC.element_to_be_clickable(
+                    (By.ID, "Button_EditReport"))).click()
+
+                try:
+                    wait.until(EC.element_to_be_clickable(
+                        (By.XPATH, "//button[contains(.,'Aceptar')]"))).click()
+                except:
+                    pass
+
+                wait.until(EC.presence_of_element_located(
+                    (By.XPATH, "//*[contains(text(),'Revisar informe')]")))
+
+                time.sleep(2)
+
+                firmante = _obtener_firmante(driver)
+
+                nombre_archivo = f"{cedula}_{nombre}".replace(
+                    " ", "_") + ".pdf"
+                carpeta_medico = firmante.replace(
+                    " ", "_") if firmante else "SIN_FIRMANTE"
+                carpeta_destino = os.path.join(DOWNLOAD_DIR, carpeta_medico)
+                os.makedirs(carpeta_destino, exist_ok=True)
+
+                ruta_pdf = os.path.join(carpeta_destino, nombre_archivo)
+
+                if not descargar_pdf_desde_iframe(driver, ruta_pdf):
+                    logger.warning(
+                        "⚠ PDF no descargado para %s | %s", nombre, cedula)
+
+                pdfs.append({
+                    "ruta": ruta_pdf,
+                    "nombre": nombre_archivo,
+                    "cedula": cedula,
+                    "examen": examen,
+                    "fecha_atencion": fecha_atencion,
+                })
+
+                driver.back()
+
+                wait.until(EC.presence_of_element_located(
+                    (By.XPATH, "//rows/row")))
+
+                if modo_una_sola:
+                    return pdfs
+
+            except Exception as e:
+                logger.error("❌ Error en fila %d: %s", i, e, exc_info=True)
+
+        # =========================
+        # 🔽 PAGINACIÓN (igual a tu función que funciona)
+        # =========================
+        try:
+            next_buttons = driver.find_elements(
+                By.CSS_SELECTOR, "span.nextPage")
+
+            if not next_buttons:
+                logger.info("📄 No hay botón de siguiente página")
                 break
 
-            wait.until(lambda d: len(d.find_elements(
-                By.XPATH, "//rows/row")) >= len(pdfs) + total_omitidas)
+            next_button = next_buttons[0]
+
+            if "disabled" in next_button.get_attribute("class"):
+                logger.info("📄 Última página alcanzada")
+                break
+
+            logger.info("➡ Siguiente página")
+
+            driver.execute_script("arguments[0].click();", next_button)
+
+            pagina += 1
+            time.sleep(3)
 
         except Exception as e:
-            logger.error("❌ Error en fila %d: %s", i, e, exc_info=True)
-        finally:
-            i += 1
+            logger.warning("⚠ No se pudo avanzar de página: %s", e)
+            break
 
     logger.info("Procesadas: %d | Omitidas: %d", len(pdfs), total_omitidas)
     return pdfs
