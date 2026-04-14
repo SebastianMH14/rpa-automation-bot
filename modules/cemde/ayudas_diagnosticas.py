@@ -13,8 +13,20 @@ from utils.radio import marcar_radio
 logger = logging.getLogger("bot")
 
 
-def _abrir_formulario_otros_ad(driver, wait) -> None:
-    """Navega a la pestaña de ayudas diagnósticas → otros AD y abre el formulario."""
+def _abrir_formulario_otros_ad(driver, wait, fecha_examen: str, tipo_examen: str) -> bool:
+    """
+    Navega a la pestaña de ayudas diagnósticas → otros AD y abre el formulario.
+
+    Args:
+        driver: WebDriver instance
+        wait: WebDriverWait instance
+        fecha_examen: Fecha del examen a cargar (formato 'YYYY-MM-DD')
+        nombre_examen: Nombre del examen a cargar (ej: 'MONITOREO AMBULATORIO DE PRESIÓN ARTERIAL SISTEMICA')
+
+    Returns:
+        True si se abrió el formulario (flujo normal),
+        False si el examen ya existe (proceso omitido).
+    """
     tab_ayudas = wait.until(
         EC.element_to_be_clickable(
             (By.XPATH, "//a[@href='#tab-ayudas-diagnosticas']"))
@@ -28,6 +40,53 @@ def _abrir_formulario_otros_ad(driver, wait) -> None:
     tab_otros.click()
     time.sleep(2)
 
+    # ── Validación: revisar si el tipo de examen ya fue cargado ──────────────
+    servicio_esperado = SERVICIOS_EXAMEN.get(tipo_examen.upper(), "").upper()
+
+    # 1. Buscar si existe una pestaña con el nombre del examen
+    tabs_ad = driver.find_elements(
+        By.XPATH,
+        "//div[contains(@class,'portlet-title')]//ul[contains(@class,'nav-tabs')]//a[@data-toggle='tab']"
+    )
+
+    tab_examen = None
+    for tab in tabs_ad:
+        if tab.text.strip().upper() == servicio_esperado:
+            tab_examen = tab
+            break
+
+    if tab_examen is not None:
+        logger.debug(
+            f"Pestaña encontrada para '{servicio_esperado}', verificando registros existentes...")
+
+        # 2. Hacer clic en la pestaña para cargar su tabla
+        tab_examen.click()
+        time.sleep(1.5)
+
+        # 3. Buscar filas en la tabla activa dentro de ese tab
+        tab_href = tab_examen.get_attribute(
+            "href").split("#")[-1]  # ej: 'tab-otroAD2'
+        filas = driver.find_elements(
+            By.XPATH,
+            f"//div[@id='{tab_href}']//table[contains(@class,'table')]//tbody//tr"
+        )
+
+        for fila in filas:
+            celdas = fila.find_elements(By.TAG_NAME, "td")
+            if len(celdas) < 2:
+                continue
+
+            fecha_celda = celdas[0].text.strip()
+            examen_celda = celdas[1].text.strip().upper()
+
+            if fecha_celda == fecha_examen and examen_celda == servicio_esperado:
+                logger.warning(
+                    f"El examen '{servicio_esperado}' con fecha '{fecha_examen}' "
+                    "ya fue cargado. Se omite el proceso."
+                )
+                return False
+
+    # ── Flujo normal: abrir formulario ───────────────────────────────────────
     btn_crear = wait.until(
         EC.element_to_be_clickable(
             (By.XPATH,
@@ -37,6 +96,7 @@ def _abrir_formulario_otros_ad(driver, wait) -> None:
     btn_crear.click()
     time.sleep(3)
     logger.debug("Formulario de ayuda diagnóstica abierto")
+    return True
 
 
 def _verificar_y_completar_diagnostico(driver, wait, codigo_diagnostico: str | None) -> None:
@@ -116,7 +176,8 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None, 
     sede_selected = seleccionar_sede(driver, wait, sede)
 
     if not sede_selected:
-        logger.warning("⚠ No se pudo seleccionar la sede '%s'. Continuando sin seleccionar sede.", sede)
+        logger.warning(
+            "⚠ No se pudo seleccionar la sede '%s'. Continuando sin seleccionar sede.", sede)
 
     # 1. Planilla de ingreso (servicio + fecha)
     if not buscar_opcion_select(driver, "planilla_ingreso", service, fecha_buscar=date_examen):
@@ -241,7 +302,11 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
             codigo_diagnostico = sentinel_data["codigo_diagnostico"] if sentinel_data else None
 
             # 4. Navegar al formulario y completarlo
-            _abrir_formulario_otros_ad(driver, wait)
+            if not _abrir_formulario_otros_ad(driver, wait, fecha_busqueda, tipo_examen):
+                logger.info("⏭ Omitiendo carga de PDF para este examen.")
+                continue
+
+            break
             _completar_formulario(
                 driver, wait, pdf, sentinel_numero, codigo_diagnostico, sede)
 
