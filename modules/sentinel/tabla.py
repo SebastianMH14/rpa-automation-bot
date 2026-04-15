@@ -23,6 +23,12 @@ if FECHA_LIMITE:
         logger.error(
             "❌ FECHA_LIMITE inválida: '%s'. Use DD/MM/YYYY.", FECHA_LIMITE)
 
+pdfs_existentes = {}
+
+for root, _, files in os.walk(DOWNLOAD_DIR):
+    for file in files:
+        pdfs_existentes[file] = os.path.join(root, file)
+
 
 # ---------------------------------------------------------------------------
 # Helpers privados
@@ -163,6 +169,7 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
 
                 cedula = cells[8].text.strip().rstrip(".")
                 nombre = cells[9].text.strip()
+                nombre = nombre.replace(",", "")
                 fecha_atencion = cells[11].text.strip()
 
                 if cedula_filtro and cedula != cedula_filtro:
@@ -208,6 +215,27 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                         return pdfs
                     continue
 
+                nombre_archivo = f"{cedula}_{nombre}_{examen}".replace(
+                    " ", "_") + ".pdf"
+
+                if nombre_archivo in pdfs_existentes:
+                    ruta_pdf = pdfs_existentes[nombre_archivo]
+
+                    logger.info("⏭ PDF ya existe, se omite descarga: %s", nombre_archivo)
+                    print(f"ruta_pdf: {ruta_pdf}")
+                    pdfs.append({
+                        "ruta": ruta_pdf,  # ✅ REAL
+                        "nombre": nombre_archivo,
+                        "cedula": cedula,
+                        "examen": examen,
+                        "fecha_atencion": fecha_atencion,
+                    })
+
+                    if modo_una_sola:
+                        return pdfs
+
+                    continue
+
                 # =========================
                 # 🔽 PROCESAMIENTO
                 # =========================
@@ -229,8 +257,6 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
 
                 firmante = _obtener_firmante(driver)
 
-                nombre_archivo = f"{cedula}_{nombre}".replace(
-                    " ", "_") + ".pdf"
                 carpeta_medico = firmante.replace(
                     " ", "_") if firmante else "SIN_FIRMANTE"
                 carpeta_destino = os.path.join(DOWNLOAD_DIR, carpeta_medico)
@@ -238,6 +264,7 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
 
                 ruta_pdf = os.path.join(carpeta_destino, nombre_archivo)
 
+                # 🔽 SOLO SI NO EXISTE
                 if not descargar_pdf_desde_iframe(driver, ruta_pdf):
                     logger.warning(
                         "⚠ PDF no descargado para %s | %s", nombre, cedula)
