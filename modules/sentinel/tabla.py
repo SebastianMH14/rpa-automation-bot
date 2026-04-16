@@ -176,8 +176,7 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                     total_omitidas += 1
                     continue
 
-                # 🔥 corte global por fecha (como querías)
-                if FECHA_LIMITE:
+                if not CEDULAS_PRUEBA and FECHA_LIMITE:
                     try:
                         fecha_dt = datetime.strptime(
                             fecha_atencion, "%d/%m/%Y %H:%M:%S")
@@ -192,7 +191,6 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                 examen_raw = cells[18].get_attribute("tooltip") or ""
                 examen = MAPEO_TIPOS_EXAMEN.get(examen_raw.strip().lower(), "")
 
-                # 🔥 lógica robusta de estado
                 estado = None
                 for cell in cells:
                     texto = (cell.text or "").strip().upper()
@@ -221,10 +219,10 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                 if nombre_archivo in pdfs_existentes:
                     ruta_pdf = pdfs_existentes[nombre_archivo]
 
-                    logger.info("⏭ PDF ya existe, se omite descarga: %s", nombre_archivo)
-                    print(f"ruta_pdf: {ruta_pdf}")
+                    logger.info(
+                        "⏭ PDF ya existe, se omite descarga: %s", nombre_archivo)
                     pdfs.append({
-                        "ruta": ruta_pdf,  # ✅ REAL
+                        "ruta": ruta_pdf,
                         "nombre": nombre_archivo,
                         "cedula": cedula,
                         "examen": examen,
@@ -259,7 +257,10 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
 
                 carpeta_medico = firmante.replace(
                     " ", "_") if firmante else "SIN_FIRMANTE"
-                carpeta_destino = os.path.join(DOWNLOAD_DIR, carpeta_medico)
+                fecha_carpeta = datetime.strptime(
+                    fecha_atencion, "%d/%m/%Y %H:%M:%S").strftime("%Y-%m-%d")
+                carpeta_destino = os.path.join(
+                    DOWNLOAD_DIR, carpeta_medico, fecha_carpeta)
                 os.makedirs(carpeta_destino, exist_ok=True)
 
                 ruta_pdf = os.path.join(carpeta_destino, nombre_archivo)

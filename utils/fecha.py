@@ -16,3 +16,15 @@ def sentinel_a_input(fecha_str: str) -> str:
     Ejemplo: '15/03/2024 08:30:00' → '2024-03-15'
     """
     return datetime.strptime(fecha_str, "%d/%m/%Y %H:%M:%S").strftime("%Y-%m-%d")
+
+
+def parse_fecha(fecha_str: str) -> datetime | None:
+    formatos = ("%Y-%m-%d", "%d/%m/%Y")
+    
+    for fmt in formatos:
+        try:
+            return datetime.strptime(fecha_str, fmt)
+        except ValueError:
+            continue
+    
+    return None

@@ -9,6 +9,10 @@ from modules.cemde.notas_enfermeria import obtener_numero_sentinel
 from utils.select2 import buscar_opcion_select
 from utils.fecha import fecha_solo_dia, sentinel_a_input
 from utils.radio import marcar_radio
+from utils.fecha import parse_fecha
+from utils.upload_report import UploadReport
+from datetime import datetime
+import os
 
 logger = logging.getLogger("bot")
 
@@ -76,10 +80,17 @@ def _abrir_formulario_otros_ad(driver, wait, fecha_examen: str, tipo_examen: str
             if len(celdas) < 2:
                 continue
 
-            fecha_celda = celdas[0].text.strip()
+            fecha_celda_raw = celdas[0].text.strip()
             examen_celda = celdas[1].text.strip().upper()
 
-            if fecha_celda == fecha_examen and examen_celda == servicio_esperado:
+            fecha_celda = parse_fecha(fecha_celda_raw)
+            fecha_objetivo = parse_fecha(fecha_examen)
+
+            if not fecha_celda or not fecha_objetivo:
+                logger.warning(f"No se pudo parsear fecha: {fecha_celda_raw}")
+                continue
+
+            if fecha_celda.date() == fecha_objetivo.date() and examen_celda == servicio_esperado:
                 logger.warning(
                     f"El examen '{servicio_esperado}' con fecha '{fecha_examen}' "
                     "ya fue cargado. Se omite el proceso."
@@ -271,6 +282,7 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
     """
     exitosos = 0
     fallidos = 0
+    report = UploadReport()                                            # ← NUEVO
 
     for idx, pdf in enumerate(pdfs, start=1):
         cedula = pdf["cedula"]
@@ -288,7 +300,7 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
             # 1. Abrir paciente
             abrir_paciente(driver, wait, cedula)
 
-            # 2. Obtener sede (informativo, puede usarse para validaciones futuras)
+            # 2. Obtener sede
             sede = obtener_sede(driver, wait, fecha_busqueda)
             if not sede:
                 logger.warning("⚠ No se pudo determinar la sede del paciente")
@@ -306,11 +318,11 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
                 logger.info("⏭ Omitiendo carga de PDF para este examen.")
                 continue
 
-            break
             _completar_formulario(
                 driver, wait, pdf, sentinel_numero, codigo_diagnostico, sede)
 
             exitosos += 1
+            report.ok(pdf)                                            # ← NUEVO
             logger.info(
                 "✅ PDF subido correctamente (%d/%d) | Cédula: %s | Examen: %s",
                 idx, len(pdfs), cedula, tipo_examen,
@@ -318,10 +330,18 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
 
         except Exception as e:
             fallidos += 1
+            report.fail(pdf, e)                                       # ← NUEVO
             logger.error(
                 "❌ Error subiendo PDF %d/%d | Cédula: %s | Archivo: %s | Error: %s",
                 idx, len(pdfs), cedula, pdf["nombre"], e,
                 exc_info=True,
             )
+
+    # ── Guardar reporte al finalizar ─────────────────────────────────────── NUEVO
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ruta_reporte = os.path.join("logs", f"reporte_{timestamp}.txt")
+    report.guardar(ruta_reporte)
+    logger.info("📋 Reporte guardado en: %s", ruta_reporte)
+    # ─────────────────────────────────────────────────────────────────────────
 
     return exitosos, fallidos

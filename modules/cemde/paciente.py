@@ -1,8 +1,10 @@
 import logging
+import re
 import time
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from config.settings import URL_PACIENTES
+from utils.fecha import parse_fecha
 
 logger = logging.getLogger("bot")
 
@@ -21,6 +23,7 @@ def abrir_paciente(driver, wait, cedula: str) -> None:
         EC.presence_of_element_located(
             (By.CSS_SELECTOR, "input[type='search']"))
     )
+    cedula = re.sub(r"[^\d]", "", cedula)
     inp.clear()
     inp.send_keys(cedula)
 
@@ -52,19 +55,35 @@ def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
         logger.debug("Tab citas clickeado via JS fallback")
     time.sleep(2)
 
+    wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//table[@id='pacientes-table']//tbody/tr/td")
+        )
+    )
+
     filas = driver.find_elements(
         By.XPATH, "//table[@id='pacientes-table']//tbody/tr"
     )
 
     for fila in filas:
         celdas = fila.find_elements(By.TAG_NAME, "td")
-        if len(celdas) < 3:
+        textos = [c.text.strip() for c in celdas]
+
+        if len(textos) < 3:
             continue
-        if fecha_busqueda in celdas[1].text.strip():
-            sede = celdas[2].text.strip()
+
+        fecha_celda_raw = textos[2].split(" ")[0]
+
+        fecha_celda = parse_fecha(fecha_celda_raw)
+        fecha_objetivo = parse_fecha(fecha_busqueda)
+
+        if not fecha_celda or not fecha_objetivo:
+            continue
+
+        if fecha_celda.date() == fecha_objetivo.date():
+            sede = textos[2]
             logger.info("🏥 Sede encontrada: %s", sede)
             return sede
-
     logger.warning("⚠ No se encontró sede para fecha %s", fecha_busqueda)
     return None
 
@@ -80,6 +99,11 @@ def seleccionar_sede(driver, wait, sede_objetivo: str) -> bool:
     Returns:
         True si se seleccionó correctamente, False si no se encontró.
     """
+    if not sede_objetivo:
+        logger.error(
+            "⚠ No se encontro la sede de atencion, no se puede seleccionar sede.")
+        return False
+
     # 1. Verificar si ya está en la sede correcta
     sede_actual = driver.find_element(
         By.CSS_SELECTOR, "a.btnCurrentSede"
