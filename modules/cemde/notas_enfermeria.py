@@ -140,6 +140,13 @@ def obtener_numero_sentinel(driver, wait, fecha_busqueda: str, tipo_examen: str)
             numero = match.group(1)
             logger.info("🔢 Número Sentinel extraído: %s", numero)
             return {"numero_sentinel": numero, "codigo_diagnostico": codigo_diagnostico}
+        elif codigo_diagnostico:
+            logger.warning(
+                "⚠ No se encontró número Sentinel pero se extrajo diagnóstico: %s",
+                codigo_diagnostico,
+            )
+            return {"numero_sentinel": None, "codigo_diagnostico": codigo_diagnostico}
+            
 
         logger.warning("⚠ No se encontró número Sentinel en las observaciones")
         return None  # nota correcta pero sin número → no seguir buscando
@@ -148,4 +155,7 @@ def obtener_numero_sentinel(driver, wait, fecha_busqueda: str, tipo_examen: str)
         "⚠ No se encontró nota de enfermería válida para fecha %s | examen: %s",
         fecha_busqueda, tipo_examen,
     )
-    return None
+    raise Exception("Nota de enfermería no encontrada para fecha {} y examen {}".format(
+        fecha_busqueda, tipo_examen
+    ))
+    # return None

@@ -1,5 +1,6 @@
 import logging
 import time
+from selenium.common import StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 
@@ -116,51 +117,81 @@ def _verificar_y_completar_diagnostico(driver, wait, codigo_diagnostico: str | N
     Si no tiene nada y se dispone de codigo_diagnostico, lo busca y selecciona.
     """
     try:
-        select_diag = driver.find_element(By.ID, "diagnostico")
-        opciones_seleccionadas = select_diag.find_elements(
-            By.CSS_SELECTOR, "option[selected]"
+
+        # ✅ Verificar selección en el contenedor visual de Select2,
+        # NO en el <select> oculto (que siempre está vacío visualmente)
+        rendered_items = driver.find_elements(
+            By.CSS_SELECTOR,
+            ".select2-selection__rendered .select2-selection__choice"
         )
 
-        if opciones_seleccionadas:
+        if rendered_items:
             logger.debug(
                 "✔ Diagnóstico ya seleccionado: '%s'",
-                opciones_seleccionadas[0].text
+                rendered_items[0].get_attribute(
+                    "title") or rendered_items[0].text
             )
-            return
+            return True
 
-        # No hay nada seleccionado
         if not codigo_diagnostico:
             logger.warning(
                 "⚠ Diagnóstico vacío y no se dispone de codigo_diagnostico")
-            return
+            return False
 
         logger.debug("Diagnóstico vacío. Buscando código: '%s'",
                      codigo_diagnostico)
 
-        # Buscar usando el input de Select2
+        # ✅ Clic en el contenedor Select2 para abrirlo (más confiable que buscar el input directamente)
+        select2_container = wait.until(
+            EC.element_to_be_clickable((
+                By.CSS_SELECTOR,
+                "#diagnostico + .select2-container .select2-selection"
+            ))
+        )
+        select2_container.click()
+        time.sleep(0.3)
+
+        # ✅ Re-localizar el input DESPUÉS del clic para evitar stale reference
         search_input = wait.until(
             EC.presence_of_element_located((
                 By.CSS_SELECTOR,
-                "#diagnostico + .select2-container .select2-search__field"
+                ".select2-container--open .select2-search__field"
             ))
         )
-        search_input.click()
-        # Mínimo 3 chars para sugerir
         search_input.send_keys(codigo_diagnostico[:4])
-        time.sleep(1.5)  # Esperar que carguen las sugerencias
+        time.sleep(1.5)  # Esperar sugerencias del servidor
 
-        # Esperar y seleccionar la primera opción que contenga el código
+        # ✅ Esperar que aparezca el dropdown con resultados (no "Searching..." ni vacío)
+        wait.until(
+            EC.presence_of_element_located((
+                By.CSS_SELECTOR,
+                ".select2-results__option:not(.select2-results__message)"
+            ))
+        )
+
+        # ✅ Re-localizar el resultado justo antes de hacer clic (evita stale)
         resultado = wait.until(
             EC.element_to_be_clickable((
                 By.XPATH,
                 f"//li[contains(@class,'select2-results__option') and contains(., '{codigo_diagnostico}')]"
             ))
         )
+
+        resultado_texto = resultado.text  # ✅ Leer el texto ANTES de hacer clic
         resultado.click()
-        logger.debug("✔ Diagnóstico seleccionado: '%s'", resultado.text)
+
+        logger.debug("✔ Diagnóstico seleccionado: '%s'", resultado_texto)
+        return True
+
+    except StaleElementReferenceException:
+        # ✅ Retry automático en caso de stale
+        logger.warning("⚠ StaleElementReference detectado, reintentando...")
+        time.sleep(1)
+        return _verificar_y_completar_diagnostico(driver, wait, codigo_diagnostico)
 
     except Exception as e:
         logger.error("❌ Error al completar diagnóstico: %s", e)
+        return False
 
 
 def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None, codigo_diagnostico: str | None, sede: str | None) -> None:
@@ -194,6 +225,8 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None, 
     if not buscar_opcion_select(driver, "planilla_ingreso", service, fecha_buscar=date_examen):
         logger.warning(
             "⚠ No se pudo seleccionar planilla_ingreso: '%s'", service)
+        raise Exception(
+            f"No se pudo seleccionar planilla_ingreso: '{service} con la fecha {date_examen}'")
 
     # 2. Fecha de elaboración
     fecha_input = wait.until(
@@ -222,19 +255,19 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None, 
     if tipo_examen == "HOLTER":
         if not buscar_opcion_select(driver, "select_equipo_medico_id", "HOLTER"):
             logger.warning("⚠ No se pudo seleccionar equipo HOLTER")
-            return
+            raise (Exception("No se pudo seleccionar equipo HOLTER"))
 
     if tipo_examen == "MAPA":
         if not buscar_opcion_select(driver, "select_marca_equipo", "SPACELABS HEALTHCARE"):
             logger.warning("⚠ No se pudo seleccionar marca para examen MAPA")
-            return
+            raise (Exception("No se pudo seleccionar marca para examen MAPA"))
 
     # 6. Código serial / número Sentinel
-    if sentinel_numero:
+    if sentinel_numero and tipo_examen in ("HOLTER"):
         if not buscar_opcion_select(driver, "select_codigo_serial", sentinel_numero):
             logger.warning(
                 "⚠ No se pudo seleccionar número Sentinel: '%s'", sentinel_numero)
-            return
+            raise (Exception(f"No se encontro el serial: '{sentinel_numero}'"))
 
     # 7. Adjuntar archivo
     input_file.send_keys(pdf["ruta"])
@@ -254,7 +287,10 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None, 
     marcar_radio(driver, input_radio, ins_si)
 
     # 9. Diagnóstico (si aplica y no está prellenado)
-    _verificar_y_completar_diagnostico(driver, wait, codigo_diagnostico)
+    if not _verificar_y_completar_diagnostico(driver, wait, codigo_diagnostico):
+        logger.warning(
+            "⚠ No se pudo completar el diagnóstico para este examen.")
+        raise Exception("No se pudo completar el diagnóstico")
 
     # 10. Guardar
     btn_guardar = driver.find_element(

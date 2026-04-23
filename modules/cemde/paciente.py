@@ -81,7 +81,7 @@ def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
             continue
 
         if fecha_celda.date() == fecha_objetivo.date():
-            sede = textos[2]
+            sede = textos[3].replace("\n", " ").strip()
             logger.info("🏥 Sede encontrada: %s", sede)
             return sede
     logger.warning("⚠ No se encontró sede para fecha %s", fecha_busqueda)
