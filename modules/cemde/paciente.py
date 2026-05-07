@@ -37,29 +37,80 @@ def abrir_paciente(driver, wait, cedula: str) -> None:
     driver.execute_script("arguments[0].click();", resultado)
     logger.debug("Paciente abierto: %s", cedula)
 
-
-def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
-    """
-    En la pestaña de atenciones, busca la fila que coincide con `fecha_busqueda`
-    (formato DD/MM/YYYY) y devuelve la sede correspondiente.
-    """
-    tab = wait.until(EC.element_to_be_clickable(
-        (By.XPATH, "//a[@href='#tab-citas']")))
-    driver.execute_script(
-        "arguments[0].scrollIntoView({block: 'center'});", tab)
-    time.sleep(0.5)
-    try:
-        tab.click()
-    except Exception:
-        driver.execute_script("arguments[0].click();", tab)
-        logger.debug("Tab citas clickeado via JS fallback")
-    time.sleep(2)
-
+    # ── NUEVO: esperar que el perfil esté completamente cargado ──
     wait.until(
         EC.presence_of_element_located(
-            (By.XPATH, "//table[@id='pacientes-table']//tbody/tr/td")
+            (By.XPATH, "//a[@href='#tab-citas']")
         )
     )
+    wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//a[@href='#tab-notas-enfermeria']")
+        )
+    )
+    logger.debug("Perfil del paciente %s completamente cargado", cedula)
+
+
+def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
+
+    def _click_tab_citas():
+        tab = wait.until(EC.element_to_be_clickable(
+            (By.XPATH, "//a[@href='#tab-citas']")))
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center'});", tab)
+        time.sleep(0.5)
+        try:
+            tab.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", tab)
+        time.sleep(2)
+
+    _click_tab_citas()
+
+    # Verificar si la tabla está vacía y reintentar recargando
+    MAX_INTENTOS = 3
+    for intento in range(1, MAX_INTENTOS + 1):
+        try:
+            script = """
+            var dt = $('#pacientes-table').DataTable();
+            return {
+                search: dt.search(),
+                page: dt.page(),
+                pageLen: dt.page.len(),
+                totalRows: dt.rows().count(),
+                totalFiltered: dt.rows({search: 'applied'}).count()
+            };
+            """
+            info = driver.execute_script(script)
+            print(f"DataTable info: {info}")
+
+            tbody = driver.find_element(
+                By.XPATH, "//table[@id='pacientes-table']//tbody")
+            contenido = tbody.get_attribute("innerHTML")
+
+            if "No hay datos disponibles" in contenido:
+                logger.warning(
+                    "⚠ Tabla vacía en intento %d/%d — recargando página",
+                    intento, MAX_INTENTOS
+                )
+                driver.refresh()
+                wait.until(EC.presence_of_element_located(
+                    (By.XPATH, "//a[@href='#tab-citas']")))
+                time.sleep(1)
+                _click_tab_citas()
+                continue
+
+            # Tabla tiene datos — procesar filas
+            break
+
+        except Exception as e:
+            logger.warning(
+                "⚠ Error leyendo tbody en intento %d: %s", intento, e)
+            time.sleep(2)
+    else:
+        logger.warning("⚠ Tabla siguió vacía tras %d intentos para fecha %s",
+                       MAX_INTENTOS, fecha_busqueda)
+        return None
 
     filas = driver.find_elements(
         By.XPATH, "//table[@id='pacientes-table']//tbody/tr"
@@ -69,11 +120,10 @@ def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
         celdas = fila.find_elements(By.TAG_NAME, "td")
         textos = [c.text.strip() for c in celdas]
 
-        if len(textos) < 3:
+        if len(textos) < 4:
             continue
 
-        fecha_celda_raw = textos[2].split(" ")[0]
-
+        fecha_celda_raw = textos[2].split()[0]
         fecha_celda = parse_fecha(fecha_celda_raw)
         fecha_objetivo = parse_fecha(fecha_busqueda)
 
@@ -84,6 +134,7 @@ def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
             sede = textos[3].replace("\n", " ").strip()
             logger.info("🏥 Sede encontrada: %s", sede)
             return sede
+
     logger.warning("⚠ No se encontró sede para fecha %s", fecha_busqueda)
     return None
 

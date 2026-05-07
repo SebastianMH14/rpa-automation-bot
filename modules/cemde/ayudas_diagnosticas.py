@@ -6,7 +6,7 @@ from selenium.webdriver.support import expected_conditions as EC
 
 from config.settings import SERVICIOS_EXAMEN, SERVICIO_DEFAULT
 from modules.cemde.paciente import abrir_paciente, obtener_sede, seleccionar_sede
-from modules.cemde.notas_enfermeria import obtener_numero_sentinel
+from modules.cemde.notas_enfermeria import agregar_nota_aclaratoria_rechazado, obtener_numero_sentinel
 from utils.select2 import buscar_opcion_select
 from utils.fecha import fecha_solo_dia, sentinel_a_input
 from utils.radio import marcar_radio
@@ -194,14 +194,14 @@ def _verificar_y_completar_diagnostico(driver, wait, codigo_diagnostico: str | N
         return False
 
 
-def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None, codigo_diagnostico: str | None, sede: str | None) -> None:
+def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, sede: str | None) -> None:
     """
     Rellena todos los campos del formulario de carga de ayuda diagnóstica
     y lo envía.
 
     Args:
         pdf             : dict con claves examen, fecha_atencion, ruta.
-        sentinel_numero : número Sentinel extraído de la nota de enfermería (puede ser None).
+        sentinel_data   : dict con datos del número Sentinel (puede ser None).
         codigo_diagnostico : código de diagnóstico extraído de la nota de enfermería (puede ser None).
         sede            : nombre de la sede a seleccionar (puede ser None).
     """
@@ -209,6 +209,12 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None, 
     fecha_atencion = pdf["fecha_atencion"]
     fecha_busqueda = fecha_solo_dia(fecha_atencion)   # DD/MM/YYYY
     date_examen = sentinel_a_input(fecha_atencion)  # YYYY-MM-DD para el input
+    sentinel_numero = sentinel_data.get(
+        "numero_sentinel") if sentinel_data else None
+    codigo_diagnostico = sentinel_data.get(
+        "codigo_diagnostico") if sentinel_data else None
+    equipo = sentinel_data.get("equipo") if sentinel_data else None
+    marca = sentinel_data.get("marca") if sentinel_data else None
 
     service = SERVICIOS_EXAMEN.get(tipo_examen, SERVICIO_DEFAULT)
     logger.debug("Servicio a seleccionar: '%s' | Fecha examen: %s",
@@ -252,22 +258,22 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None, 
                 "❌ No se pudo seleccionar select_servicio_id: '%s'", service)
 
     # 5. Selects específicos por tipo de examen
-    if tipo_examen == "HOLTER":
-        if not buscar_opcion_select(driver, "select_equipo_medico_id", "HOLTER"):
-            logger.warning("⚠ No se pudo seleccionar equipo HOLTER")
-            raise (Exception("No se pudo seleccionar equipo HOLTER"))
+    # if tipo_examen == "HOLTER":
+    if not buscar_opcion_select(driver, "select_equipo_medico_id", equipo):
+        logger.warning("⚠ No se pudo seleccionar equipo HOLTER")
+        raise (Exception("No se pudo seleccionar equipo HOLTER"))
 
-    if tipo_examen == "MAPA":
-        if not buscar_opcion_select(driver, "select_marca_equipo", "SPACELABS HEALTHCARE"):
-            logger.warning("⚠ No se pudo seleccionar marca para examen MAPA")
-            raise (Exception("No se pudo seleccionar marca para examen MAPA"))
+    # if tipo_examen == "MAPA":
+    if not buscar_opcion_select(driver, "select_marca_equipo", marca):
+        logger.warning("⚠ No se pudo seleccionar marca para examen MAPA")
+        raise (Exception("No se pudo seleccionar marca para examen MAPA"))
 
     # 6. Código serial / número Sentinel
-    if sentinel_numero and tipo_examen in ("HOLTER"):
-        if not buscar_opcion_select(driver, "select_codigo_serial", sentinel_numero):
-            logger.warning(
-                "⚠ No se pudo seleccionar número Sentinel: '%s'", sentinel_numero)
-            raise (Exception(f"No se encontro el serial: '{sentinel_numero}'"))
+    # if sentinel_numero and tipo_examen in ("HOLTER"):
+    if not buscar_opcion_select(driver, "select_codigo_serial", sentinel_numero):
+        logger.warning(
+            "⚠ No se pudo seleccionar número Sentinel: '%s'", sentinel_numero)
+        raise (Exception(f"No se encontro el serial: '{sentinel_numero}'"))
 
     # 7. Adjuntar archivo
     input_file.send_keys(pdf["ruta"])
@@ -325,6 +331,7 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
         tipo_examen = pdf["examen"]
         fecha_atencion = pdf["fecha_atencion"]
         fecha_busqueda = fecha_solo_dia(fecha_atencion)
+        estado = pdf.get("estado", "CONFIRMADO")
 
         logger.info("─" * 50)
         logger.info(
@@ -336,6 +343,28 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
             # 1. Abrir paciente
             abrir_paciente(driver, wait, cedula)
 
+             # ── Flujo RECHAZADO ──────────────────────────────────────────
+            if estado == "RECHAZADO":
+                ok = agregar_nota_aclaratoria_rechazado(
+                    driver, wait, fecha_busqueda, tipo_examen
+                )
+                if ok:
+                    exitosos += 1
+                    report.ok(pdf)
+                    logger.info(
+                        "✅ Nota aclaratoria agregada (%d/%d) | Cédula: %s | Examen: %s",
+                        idx, len(pdfs), cedula, tipo_examen,
+                    )
+                else:
+                    fallidos += 1
+                    report.fail(pdf, Exception("No se encontró nota válida para aclaratoria"))
+                    logger.warning(
+                        "⚠ No se pudo agregar nota aclaratoria | Cédula: %s | Examen: %s",
+                        cedula, tipo_examen,
+                    )
+                continue 
+
+            # ── Flujo CONFIRMADO / RECONFIRMADO ──────────────────────────
             # 2. Obtener sede
             sede = obtener_sede(driver, wait, fecha_busqueda)
             if not sede:
@@ -346,8 +375,10 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
                 driver, wait, fecha_busqueda, tipo_examen
             )
 
-            sentinel_numero = sentinel_data["numero_sentinel"] if sentinel_data else None
-            codigo_diagnostico = sentinel_data["codigo_diagnostico"] if sentinel_data else None
+            print(f"sentinel_data: {sentinel_data}")
+
+            # sentinel_numero = sentinel_data["numero_sentinel"] if sentinel_data else None
+            # codigo_diagnostico = sentinel_data["codigo_diagnostico"] if sentinel_data else None
 
             # 4. Navegar al formulario y completarlo
             if not _abrir_formulario_otros_ad(driver, wait, fecha_busqueda, tipo_examen):
@@ -355,7 +386,7 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
                 continue
 
             _completar_formulario(
-                driver, wait, pdf, sentinel_numero, codigo_diagnostico, sede)
+                driver, wait, pdf, sentinel_data, sede)
 
             exitosos += 1
             report.ok(pdf)                                            # ← NUEVO

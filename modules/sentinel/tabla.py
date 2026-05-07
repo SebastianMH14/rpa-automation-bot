@@ -201,8 +201,8 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                     elif texto == "RECONFIRMADO":
                         estado = "RECONFIRMADO"
                         break
-                    elif texto == "COMPLETADO":
-                        estado = "COMPLETADO"
+                    elif texto == "RECHAZADO":          # ← NUEVO
+                        estado = "RECHAZADO"
                         break
 
                 logger.info(
@@ -210,7 +210,7 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                     nombre, cedula, examen or "(vacío)", fecha_atencion, estado or "(sin estado)"
                 )
 
-                if estado not in ("CONFIRMADO", "RECONFIRMADO", "COMPLETADO"):
+                if estado not in ("CONFIRMADO", "RECONFIRMADO", "RECHAZADO"):
                     total_omitidas += 1
                     if modo_una_sola:
                         return pdfs
@@ -230,6 +230,7 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                         "cedula": cedula,
                         "examen": examen,
                         "fecha_atencion": fecha_atencion,
+                        "estado": estado,
                     })
 
                     if modo_una_sola:
@@ -279,6 +280,7 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                     "cedula": cedula,
                     "examen": examen,
                     "fecha_atencion": fecha_atencion,
+                    "estado": estado,
                 })
 
                 driver.back()
