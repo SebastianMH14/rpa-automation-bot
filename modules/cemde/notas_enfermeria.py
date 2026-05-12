@@ -101,9 +101,9 @@ def obtener_numero_sentinel(driver, wait, fecha_busqueda: str, tipo_examen: str)
             logger.info(
                 "✅ Servicio coincide | Nota: '%s' | Examen: '%s'", servicio_nota, tipo_examen)
 
-            observaciones = driver.find_element(
-                By.CLASS_NAME, "observaciones_nota_enfermeria"
-            ).text
+            # observaciones = driver.find_element(
+            #     By.CLASS_NAME, "observaciones_nota_enfermeria"
+            # ).text
 
             diagnostico_raw = driver.find_element(
                 By.XPATH,
@@ -130,45 +130,13 @@ def obtener_numero_sentinel(driver, wait, fecha_busqueda: str, tipo_examen: str)
         finally:
             _cerrar_y_volver(driver, ventana_principal)
 
-        match = re.search(r"SENTINEL\s*#\s*(\d+)",
-                          observaciones, re.IGNORECASE)
-
-        if match:
-            numero = match.group(1)
-            logger.info("🔢 Número Sentinel extraído: %s", numero)
-            return {
-                "numero_sentinel":    numero,
-                "codigo_diagnostico": codigo_diagnostico,
-                "equipo":             equipo,
-                "marca":              marca,
-                "serial":             serial,
-            }
-
-        if codigo_diagnostico:
-            logger.warning(
-                "⚠ No se encontró número Sentinel pero sí diagnóstico: %s", codigo_diagnostico
-            )
-            return {
-                "numero_sentinel":    None,
-                "codigo_diagnostico": codigo_diagnostico,
-                "equipo":             equipo,
-                "marca":              marca,
-                "serial":             serial,
-            }
-
-        logger.warning(
-            "⚠ Nota correcta encontrada pero sin Sentinel ni diagnóstico.")
-        return None
-
-    logger.warning(
-        "⚠ No se encontró nota de enfermería válida para fecha %s | examen: %s",
-        fecha_busqueda, tipo_examen,
-    )
-    raise Exception(
-        "Nota de enfermería no encontrada para fecha {} y examen {}".format(
-            fecha_busqueda, tipo_examen
-        )
-    )
+        return {
+            "numero_sentinel":    serial,  # <-- USO SERIAL COMO FALLBACK
+            "codigo_diagnostico": codigo_diagnostico,
+            "equipo":             equipo,
+            "marca":              marca,
+            "serial":             serial,
+        }
 
 
 def _get_field_value(driver, label: str) -> str:

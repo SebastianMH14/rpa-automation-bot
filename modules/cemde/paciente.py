@@ -71,19 +71,6 @@ def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
     MAX_INTENTOS = 3
     for intento in range(1, MAX_INTENTOS + 1):
         try:
-            script = """
-            var dt = $('#pacientes-table').DataTable();
-            return {
-                search: dt.search(),
-                page: dt.page(),
-                pageLen: dt.page.len(),
-                totalRows: dt.rows().count(),
-                totalFiltered: dt.rows({search: 'applied'}).count()
-            };
-            """
-            info = driver.execute_script(script)
-            print(f"DataTable info: {info}")
-
             tbody = driver.find_element(
                 By.XPATH, "//table[@id='pacientes-table']//tbody")
             contenido = tbody.get_attribute("innerHTML")

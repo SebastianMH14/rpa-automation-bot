@@ -7,7 +7,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from config.settings import SERVICIOS_EXAMEN, SERVICIO_DEFAULT
 from modules.cemde.paciente import abrir_paciente, obtener_sede, seleccionar_sede
 from modules.cemde.notas_enfermeria import agregar_nota_aclaratoria_rechazado, obtener_numero_sentinel
-from utils.select2 import buscar_opcion_select
+from utils.select2 import buscar_opcion_select, _limpiar_nombre_firmante, _normalizar_nombre_busqueda, buscar_opcion_select_lectura
 from utils.fecha import fecha_solo_dia, sentinel_a_input
 from utils.radio import marcar_radio
 from utils.fecha import parse_fecha
@@ -194,7 +194,7 @@ def _verificar_y_completar_diagnostico(driver, wait, codigo_diagnostico: str | N
         return False
 
 
-def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, sede: str | None) -> None:
+def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, sede: str | None, firmante: str | None) -> None:
     """
     Rellena todos los campos del formulario de carga de ayuda diagnóstica
     y lo envía.
@@ -204,6 +204,7 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, s
         sentinel_data   : dict con datos del número Sentinel (puede ser None).
         codigo_diagnostico : código de diagnóstico extraído de la nota de enfermería (puede ser None).
         sede            : nombre de la sede a seleccionar (puede ser None).
+        firmante        : nombre del firmante (puede ser None).
     """
     tipo_examen = pdf["examen"]
     fecha_atencion = pdf["fecha_atencion"]
@@ -275,6 +276,13 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, s
             "⚠ No se pudo seleccionar número Sentinel: '%s'", sentinel_numero)
         raise (Exception(f"No se encontro el serial: '{sentinel_numero}'"))
 
+    if firmante:
+        firmante_limpio = _limpiar_nombre_firmante(firmante)
+        firmante_limpio = _normalizar_nombre_busqueda(firmante_limpio)
+        if not buscar_opcion_select_lectura(driver, "usuario_lectura", firmante_limpio):
+            logger.warning(
+                "⚠ No se pudo seleccionar firmante: '%s'", firmante_limpio)
+
     # 7. Adjuntar archivo
     input_file.send_keys(pdf["ruta"])
     logger.debug("Archivo adjuntado: %s", pdf["ruta"])
@@ -324,6 +332,8 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
     """
     exitosos = 0
     fallidos = 0
+    rechazados = 0
+    procesados = 0
     report = UploadReport()                                            # ← NUEVO
 
     for idx, pdf in enumerate(pdfs, start=1):
@@ -332,6 +342,7 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
         fecha_atencion = pdf["fecha_atencion"]
         fecha_busqueda = fecha_solo_dia(fecha_atencion)
         estado = pdf.get("estado", "CONFIRMADO")
+        firmante = pdf.get("firmante", None)
 
         logger.info("─" * 50)
         logger.info(
@@ -343,26 +354,27 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
             # 1. Abrir paciente
             abrir_paciente(driver, wait, cedula)
 
-             # ── Flujo RECHAZADO ──────────────────────────────────────────
+            # ── Flujo RECHAZADO ──────────────────────────────────────────
             if estado == "RECHAZADO":
                 ok = agregar_nota_aclaratoria_rechazado(
                     driver, wait, fecha_busqueda, tipo_examen
                 )
                 if ok:
-                    exitosos += 1
-                    report.ok(pdf)
+                    rechazados += 1
+                    report.reject(pdf)
                     logger.info(
                         "✅ Nota aclaratoria agregada (%d/%d) | Cédula: %s | Examen: %s",
                         idx, len(pdfs), cedula, tipo_examen,
                     )
                 else:
                     fallidos += 1
-                    report.fail(pdf, Exception("No se encontró nota válida para aclaratoria"))
+                    report.fail(pdf, Exception(
+                        "El examen esta rechazado pero no se pudo agregar la nota aclaratoria"))
                     logger.warning(
                         "⚠ No se pudo agregar nota aclaratoria | Cédula: %s | Examen: %s",
                         cedula, tipo_examen,
                     )
-                continue 
+                continue
 
             # ── Flujo CONFIRMADO / RECONFIRMADO ──────────────────────────
             # 2. Obtener sede
@@ -375,18 +387,18 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
                 driver, wait, fecha_busqueda, tipo_examen
             )
 
-            print(f"sentinel_data: {sentinel_data}")
-
             # sentinel_numero = sentinel_data["numero_sentinel"] if sentinel_data else None
             # codigo_diagnostico = sentinel_data["codigo_diagnostico"] if sentinel_data else None
 
             # 4. Navegar al formulario y completarlo
             if not _abrir_formulario_otros_ad(driver, wait, fecha_busqueda, tipo_examen):
                 logger.info("⏭ Omitiendo carga de PDF para este examen.")
+                procesados += 1
+                report.already(pdf)                                       # ← NUEVO
                 continue
 
             _completar_formulario(
-                driver, wait, pdf, sentinel_data, sede)
+                driver, wait, pdf, sentinel_data, sede, firmante)
 
             exitosos += 1
             report.ok(pdf)                                            # ← NUEVO
@@ -411,4 +423,4 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
     logger.info("📋 Reporte guardado en: %s", ruta_reporte)
     # ─────────────────────────────────────────────────────────────────────────
 
-    return exitosos, fallidos
+    return exitosos, fallidos, rechazados, procesados

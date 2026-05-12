@@ -53,6 +53,19 @@ def _obtener_firmante(driver) -> str | None:
     return None
 
 
+def _firmante_desde_ruta(ruta_pdf: str) -> str | None:
+    """
+    Extrae el nombre del firmante del penúltimo componente de la ruta.
+    Estructura esperada: …/NOMBRE_MEDICO/YYYY-MM-DD/archivo.pdf
+    """
+    partes = os.path.normpath(ruta_pdf).split(os.sep)
+    # partes[-1] = archivo, partes[-2] = fecha, partes[-3] = médico
+    if len(partes) >= 3:
+        carpeta_medico = partes[-3]
+        return carpeta_medico.replace("_", " ") if carpeta_medico != "SIN_FIRMANTE" else None
+    return None
+
+
 def _abrir_informe(driver, wait, row) -> bool:
     """
     Hace clic en la fila y luego en 'Revisar informe'.
@@ -157,7 +170,6 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
 
         for i in range(len(rows)):
             try:
-                # 🔥 CLAVE: refrescar filas cada vez (como tu función buena)
                 rows = driver.find_elements(By.XPATH, "//rows/row")
                 row = rows[i]
 
@@ -222,8 +234,10 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                 if nombre_archivo in pdfs_existentes:
                     ruta_pdf = pdfs_existentes[nombre_archivo]
 
-                    logger.info(
-                        "⏭ PDF ya existe, se omite descarga: %s", nombre_archivo)
+                    firmante = _firmante_desde_ruta(ruta_pdf)
+
+                    logger.info("⏭ PDF ya existe, se omite descarga: %s (firmante: %s)",
+                                nombre_archivo, firmante or "desconocido")
                     pdfs.append({
                         "ruta": ruta_pdf,
                         "nombre": nombre_archivo,
@@ -231,6 +245,7 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                         "examen": examen,
                         "fecha_atencion": fecha_atencion,
                         "estado": estado,
+                        "firmante": firmante,   # ← NUEVO
                     })
 
                     if modo_una_sola:
@@ -281,6 +296,7 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                     "examen": examen,
                     "fecha_atencion": fecha_atencion,
                     "estado": estado,
+                    "firmante": firmante,   # ← NUEVO
                 })
 
                 driver.back()
