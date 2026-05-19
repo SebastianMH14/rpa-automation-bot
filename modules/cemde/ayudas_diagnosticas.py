@@ -228,7 +228,6 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, s
         logger.warning(
             "⚠ No se pudo seleccionar la sede '%s'. Continuando sin seleccionar sede.", sede)
 
-    # 1. Planilla de ingreso (servicio + fecha)
     if not buscar_opcion_select(driver, "planilla_ingreso", service, fecha_buscar=date_examen):
         logger.warning(
             "⚠ No se pudo seleccionar planilla_ingreso: '%s'", service)
@@ -282,6 +281,7 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, s
         if not buscar_opcion_select_lectura(driver, "usuario_lectura", firmante_limpio):
             logger.warning(
                 "⚠ No se pudo seleccionar firmante: '%s'", firmante_limpio)
+            raise (Exception(f"No se encontro el firmante: '{firmante_limpio}'"))
 
     # 7. Adjuntar archivo
     input_file.send_keys(pdf["ruta"])

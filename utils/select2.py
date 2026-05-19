@@ -129,20 +129,6 @@ def buscar_opcion_select_lectura(
     fecha_buscar: str | None = None,
     timeout: int = 10,
 ) -> bool:
-    """
-    Busca y selecciona una opción en un Select2 con carga AJAX.
-
-    Args:
-        driver       : instancia de Selenium WebDriver.
-        select_id    : id base del select2 (ej: 'usuario_lectura').
-        texto_buscar : texto a buscar en las opciones (case-insensitive).
-        fecha_buscar : fragmento de fecha adicional para filtrar (opcional).
-        timeout      : segundos máximos de espera.
-
-    Returns:
-        True si se seleccionó la opción, False en caso contrario.
-    """
-
     TEXTOS_INVALIDOS = {
         "cargando...",
         "searching...",
@@ -184,40 +170,65 @@ def buscar_opcion_select_lectura(
 
         # ── 3. Esperar resultados AJAX reales (ignorar "Cargando...") ─────
         def resultados_reales(d):
-            elementos = d.find_elements(By.CSS_SELECTOR, css_results)
-            textos = [e.text.strip().lower()
-                      for e in elementos if e.text.strip()]
-            if not textos:
-                return False
-            validos = [t for t in textos if t not in TEXTOS_INVALIDOS]
-            return elementos if validos else False
-
-        opciones = WebDriverWait(driver, timeout).until(resultados_reales)
-
-        # ── 4. Localizar opción objetivo ──────────────────────────────────
-        palabras = texto_buscar.lower().split()
-        opcion_objetivo = None
-
-        for opcion in opciones:
             try:
-                texto = opcion.text.strip()
-                texto_lower = texto.lower()
+                elementos = d.find_elements(By.CSS_SELECTOR, css_results)
+                if not elementos:
+                    return False
 
-                if not texto or texto_lower in TEXTOS_INVALIDOS:
-                    continue
-                if texto_lower.startswith("seleccione"):
-                    continue
-                if "no results" in texto_lower or "sin resultado" in texto_lower:
-                    break
-                if not all(p in texto_lower for p in palabras):
-                    continue
-                if fecha_buscar and fecha_buscar not in texto:
-                    continue
+                textos_validos = []
+                for e in elementos:
+                    try:
+                        t = e.text.strip().lower()
+                        if t and t not in TEXTOS_INVALIDOS:
+                            textos_validos.append(t)
+                    except StaleElementReferenceException:
+                        return False  # DOM cambió → reintentar
 
-                opcion_objetivo = opcion
-                break
+                return bool(textos_validos)
 
             except StaleElementReferenceException:
+                return False
+
+        WebDriverWait(driver, timeout).until(resultados_reales)
+
+        # ── 4. Localizar opción objetivo (con re-fetch para evitar stale) ─
+        palabras = texto_buscar.lower().split()
+        opcion_objetivo = None
+        max_intentos = 3
+
+        for intento in range(max_intentos):
+            try:
+                opciones_frescas = driver.find_elements(
+                    By.CSS_SELECTOR, css_results)
+                for opcion in opciones_frescas:
+                    try:
+                        texto = opcion.text.strip()
+                        texto_lower = texto.lower()
+
+                        if not texto or texto_lower in TEXTOS_INVALIDOS:
+                            continue
+                        if texto_lower.startswith("seleccione"):
+                            continue
+                        if "no results" in texto_lower or "sin resultado" in texto_lower:
+                            break
+                        if not all(p in texto_lower for p in palabras):
+                            continue
+                        if fecha_buscar and fecha_buscar not in texto:
+                            continue
+
+                        opcion_objetivo = opcion
+                        break
+
+                    except StaleElementReferenceException:
+                        break  # DOM cambió → reintentar el for exterior
+
+                if opcion_objetivo is not None:
+                    break
+
+                time.sleep(0.3)
+
+            except StaleElementReferenceException:
+                time.sleep(0.3)
                 continue
 
         if opcion_objetivo is None:
@@ -247,7 +258,32 @@ def buscar_opcion_select_lectura(
             except Exception:
                 pass
 
-        # Intento 2: Enter en el input de búsqueda
+        # Intento 2: re-fetch + click por JS (opcion_objetivo puede ser stale aquí)
+        if not seleccionado:
+            try:
+                opciones_frescas = driver.find_elements(
+                    By.CSS_SELECTOR, css_results)
+                for opcion in opciones_frescas:
+                    try:
+                        texto = opcion.text.strip()
+                        texto_lower = texto.lower()
+                        if not all(p in texto_lower for p in palabras):
+                            continue
+                        if fecha_buscar and fecha_buscar not in texto:
+                            continue
+                        driver.execute_script("arguments[0].click();", opcion)
+                        WebDriverWait(driver, 3).until_not(
+                            EC.presence_of_element_located(
+                                (By.CSS_SELECTOR, css_open))
+                        )
+                        seleccionado = True
+                        break
+                    except StaleElementReferenceException:
+                        continue
+            except Exception:
+                pass
+
+        # Intento 3: Enter en el input de búsqueda
         if not seleccionado:
             try:
                 search = driver.find_element(By.CSS_SELECTOR, css_search)
@@ -261,18 +297,32 @@ def buscar_opcion_select_lectura(
             except Exception:
                 pass
 
-        # Intento 3: ActionChains
+        # Intento 4: ActionChains con re-fetch
         if not seleccionado:
             try:
-                ActionChains(driver)\
-                    .move_to_element(opcion_objetivo)\
-                    .pause(0.2)\
-                    .click()\
-                    .perform()
-                WebDriverWait(driver, 3).until_not(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, css_open))
-                )
-                seleccionado = True
+                opciones_frescas = driver.find_elements(
+                    By.CSS_SELECTOR, css_results)
+                for opcion in opciones_frescas:
+                    try:
+                        texto = opcion.text.strip()
+                        texto_lower = texto.lower()
+                        if not all(p in texto_lower for p in palabras):
+                            continue
+                        if fecha_buscar and fecha_buscar not in texto:
+                            continue
+                        ActionChains(driver)\
+                            .move_to_element(opcion)\
+                            .pause(0.2)\
+                            .click()\
+                            .perform()
+                        WebDriverWait(driver, 3).until_not(
+                            EC.presence_of_element_located(
+                                (By.CSS_SELECTOR, css_open))
+                        )
+                        seleccionado = True
+                        break
+                    except StaleElementReferenceException:
+                        continue
             except Exception:
                 pass
 
