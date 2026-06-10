@@ -3,6 +3,7 @@ import time
 from selenium.common import StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
 from config.settings import SERVICIOS_EXAMEN, SERVICIO_DEFAULT
 from modules.cemde.paciente import abrir_paciente, obtener_sede, seleccionar_sede
@@ -194,7 +195,7 @@ def _verificar_y_completar_diagnostico(driver, wait, codigo_diagnostico: str | N
         return False
 
 
-def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, sede: str | None, firmante: str | None) -> None:
+def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, sede: str | None, firmante: str | None, fecha_celda_fallback: str | None = None) -> None:
     """
     Rellena todos los campos del formulario de carga de ayuda diagnóstica
     y lo envía.
@@ -228,11 +229,32 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, s
         logger.warning(
             "⚠ No se pudo seleccionar la sede '%s'. Continuando sin seleccionar sede.", sede)
 
-    if not buscar_opcion_select(driver, "planilla_ingreso", service, fecha_buscar=date_examen):
+    # Si obtener_sede entró por fallback (Fecha Rep), usar la fecha de la celda
+    # en lugar de la fecha de atención del PDF para buscar la planilla de ingreso
+    fecha_planilla = fecha_celda_fallback if fecha_celda_fallback else date_examen
+    if fecha_celda_fallback:
+        logger.info(
+            "📅 Fallback activo: usando fecha_celda '%s' en lugar de date_examen '%s' "
+            "para planilla_ingreso", fecha_celda_fallback, date_examen
+        )
+
+    # Esperar a que el select2 de planilla_ingreso esté disponible y clickeable
+    # (el cambio de sede puede recargar/re-renderizar el formulario)
+    try:
+        WebDriverWait(driver, 15).until(
+            EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "[aria-labelledby='select2-planilla_ingreso-container']")
+            )
+        )
+        logger.debug("✅ Select2 planilla_ingreso listo")
+    except Exception:
+        logger.warning("⚠ Timeout esperando select2 planilla_ingreso — intentando de todas formas")
+
+    if not buscar_opcion_select(driver, "planilla_ingreso", service, fecha_buscar=fecha_planilla):
         logger.warning(
             "⚠ No se pudo seleccionar planilla_ingreso: '%s'", service)
         raise Exception(
-            f"No se pudo seleccionar planilla_ingreso: '{service} con la fecha {date_examen}'")
+            f"No se pudo seleccionar planilla_ingreso: '{service} con la fecha {fecha_planilla}'")
 
     # 2. Fecha de elaboración
     fecha_input = wait.until(
@@ -378,7 +400,7 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
 
             # ── Flujo CONFIRMADO / RECONFIRMADO ──────────────────────────
             # 2. Obtener sede
-            sede = obtener_sede(driver, wait, fecha_busqueda)
+            sede, fecha_celda_fallback = obtener_sede(driver, wait, fecha_busqueda)
             if not sede:
                 logger.warning("⚠ No se pudo determinar la sede del paciente")
 
@@ -398,7 +420,7 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
                 continue
 
             _completar_formulario(
-                driver, wait, pdf, sentinel_data, sede, firmante)
+                driver, wait, pdf, sentinel_data, sede, firmante, fecha_celda_fallback)
 
             exitosos += 1
             report.ok(pdf)                                            # ← NUEVO
@@ -423,4 +445,4 @@ def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
     logger.info("📋 Reporte guardado en: %s", ruta_reporte)
     # ─────────────────────────────────────────────────────────────────────────
 
-    return exitosos, fallidos, rechazados, procesados
+    return exitosos, fallidos, rechazados, procesados, report, ruta_reporte

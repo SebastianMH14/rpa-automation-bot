@@ -51,7 +51,7 @@ def abrir_paciente(driver, wait, cedula: str) -> None:
     logger.debug("Perfil del paciente %s completamente cargado", cedula)
 
 
-def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
+def obtener_sede(driver, wait, fecha_busqueda: str) -> tuple[str | None, str | None]:
     def _click_tab_citas():
         tab = wait.until(EC.element_to_be_clickable(
             (By.XPATH, "//a[@href='#tab-citas']")))
@@ -91,7 +91,7 @@ def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
     else:
         logger.warning("⚠ Tabla siguió vacía tras %d intentos para fecha %s",
                        MAX_INTENTOS, fecha_busqueda)
-        return None
+        return None, None
 
     filas = driver.find_elements(
         By.XPATH, "//table[@id='pacientes-table']//tbody/tr"
@@ -101,7 +101,7 @@ def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
     if not fecha_objetivo:
         logger.warning(
             "⚠ No se pudo parsear fecha_busqueda: %s", fecha_busqueda)
-        return None
+        return None, None
 
     for fila in filas:
         celdas = fila.find_elements(By.TAG_NAME, "td")
@@ -115,7 +115,7 @@ def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
         if fecha_celda and fecha_celda.date() == fecha_objetivo.date():
             sede = textos[3].replace("\n", " ").strip()
             logger.info("🏥 Sede encontrada por Fecha: %s", sede)
-            return sede
+            return sede, None  # fecha_celda_str=None → no es fallback
 
         # --- Fallback: comparar por columna Fecha Rep (índice 12) ---
         if len(textos) > 12:
@@ -126,15 +126,18 @@ def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
                 fecha_rep = parse_fecha(fecha_rep_solo)
                 if fecha_rep and fecha_rep.date() == fecha_objetivo.date():
                     sede = textos[3].replace("\n", " ").strip()
+                    # Convertir fecha_celda (índice 2) a YYYY-MM-DD para el formulario
+                    fecha_celda_str = fecha_celda.strftime("%Y-%m-%d") if fecha_celda else None
                     logger.info(
-                        "🏥 Sede encontrada por Fecha Rep: %s (Fecha Rep: %s)",
-                        sede, fecha_rep_raw
+                        "🏥 Sede encontrada por Fecha Rep: %s (Fecha Rep: %s) | "
+                        "fecha_celda para formulario: %s",
+                        sede, fecha_rep_raw, fecha_celda_str
                     )
-                    return sede
+                    return sede, fecha_celda_str  # fallback activo
 
     logger.warning("⚠ No se encontró sede para fecha %s (ni por Fecha ni por Fecha Rep)",
                    fecha_busqueda)
-    return None
+    return None, None
 
 
 def seleccionar_sede(driver, wait, sede_objetivo: str) -> bool:
