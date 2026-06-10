@@ -52,7 +52,6 @@ def abrir_paciente(driver, wait, cedula: str) -> None:
 
 
 def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
-
     def _click_tab_citas():
         tab = wait.until(EC.element_to_be_clickable(
             (By.XPATH, "//a[@href='#tab-citas']")))
@@ -67,14 +66,12 @@ def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
 
     _click_tab_citas()
 
-    # Verificar si la tabla está vacía y reintentar recargando
     MAX_INTENTOS = 3
     for intento in range(1, MAX_INTENTOS + 1):
         try:
             tbody = driver.find_element(
                 By.XPATH, "//table[@id='pacientes-table']//tbody")
             contenido = tbody.get_attribute("innerHTML")
-
             if "No hay datos disponibles" in contenido:
                 logger.warning(
                     "⚠ Tabla vacía en intento %d/%d — recargando página",
@@ -86,10 +83,7 @@ def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
                 time.sleep(1)
                 _click_tab_citas()
                 continue
-
-            # Tabla tiene datos — procesar filas
             break
-
         except Exception as e:
             logger.warning(
                 "⚠ Error leyendo tbody en intento %d: %s", intento, e)
@@ -103,26 +97,43 @@ def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
         By.XPATH, "//table[@id='pacientes-table']//tbody/tr"
     )
 
+    fecha_objetivo = parse_fecha(fecha_busqueda)
+    if not fecha_objetivo:
+        logger.warning(
+            "⚠ No se pudo parsear fecha_busqueda: %s", fecha_busqueda)
+        return None
+
     for fila in filas:
         celdas = fila.find_elements(By.TAG_NAME, "td")
         textos = [c.text.strip() for c in celdas]
-
         if len(textos) < 4:
             continue
 
+        # --- Comparar por columna Fecha (índice 2) ---
         fecha_celda_raw = textos[2].split()[0]
         fecha_celda = parse_fecha(fecha_celda_raw)
-        fecha_objetivo = parse_fecha(fecha_busqueda)
-
-        if not fecha_celda or not fecha_objetivo:
-            continue
-
-        if fecha_celda.date() == fecha_objetivo.date():
+        if fecha_celda and fecha_celda.date() == fecha_objetivo.date():
             sede = textos[3].replace("\n", " ").strip()
-            logger.info("🏥 Sede encontrada: %s", sede)
+            logger.info("🏥 Sede encontrada por Fecha: %s", sede)
             return sede
 
-    logger.warning("⚠ No se encontró sede para fecha %s", fecha_busqueda)
+        # --- Fallback: comparar por columna Fecha Rep (índice 12) ---
+        if len(textos) > 12:
+            fecha_rep_raw = textos[12].strip()
+            if fecha_rep_raw and fecha_rep_raw.upper() != "N/A":
+                # Tomar solo la parte de fecha (antes del primer espacio)
+                fecha_rep_solo = fecha_rep_raw.split()[0]
+                fecha_rep = parse_fecha(fecha_rep_solo)
+                if fecha_rep and fecha_rep.date() == fecha_objetivo.date():
+                    sede = textos[3].replace("\n", " ").strip()
+                    logger.info(
+                        "🏥 Sede encontrada por Fecha Rep: %s (Fecha Rep: %s)",
+                        sede, fecha_rep_raw
+                    )
+                    return sede
+
+    logger.warning("⚠ No se encontró sede para fecha %s (ni por Fecha ni por Fecha Rep)",
+                   fecha_busqueda)
     return None
 
 

@@ -23,10 +23,16 @@ if FECHA_LIMITE:
         logger.error(
             "❌ FECHA_LIMITE inválida: '%s'. Use DD/MM/YYYY.", FECHA_LIMITE)
 
+# Índice: clave = "YYYY-MM-DD/nombre_archivo.pdf" → ruta completa
+# Así se distinguen el mismo examen en fechas distintas para un mismo paciente.
 pdfs_existentes = {}
 
 for root, _, files in os.walk(DOWNLOAD_DIR):
     for file in files:
+        fecha_dir = os.path.basename(root)  # carpeta inmediata = YYYY-MM-DD
+        clave = f"{fecha_dir}/{file}"
+        pdfs_existentes[clave] = os.path.join(root, file)
+        # También indexamos solo por nombre para compatibilidad con código legado
         pdfs_existentes[file] = os.path.join(root, file)
 
 
@@ -231,8 +237,17 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                 nombre_archivo = f"{cedula}_{nombre}_{examen}".replace(
                     " ", "_") + ".pdf"
 
-                if nombre_archivo in pdfs_existentes:
-                    ruta_pdf = pdfs_existentes[nombre_archivo]
+                # La clave incluye la fecha para permitir el mismo examen en fechas distintas
+                try:
+                    fecha_carpeta_key = datetime.strptime(
+                        fecha_atencion, "%d/%m/%Y %H:%M:%S").strftime("%Y-%m-%d")
+                except ValueError:
+                    fecha_carpeta_key = fecha_atencion
+
+                clave_dedup = f"{fecha_carpeta_key}/{nombre_archivo}"
+
+                if clave_dedup in pdfs_existentes:
+                    ruta_pdf = pdfs_existentes[clave_dedup]
 
                     firmante = _firmante_desde_ruta(ruta_pdf)
 
@@ -288,6 +303,11 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                 if not descargar_pdf_desde_iframe(driver, ruta_pdf):
                     logger.warning(
                         "⚠ PDF no descargado para %s | %s", nombre, cedula)
+                    total_omitidas += 1
+                    driver.back()
+                    wait.until(EC.presence_of_element_located(
+                        (By.XPATH, "//rows/row")))
+                    continue
 
                 pdfs.append({
                     "ruta": ruta_pdf,
