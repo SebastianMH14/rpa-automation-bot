@@ -243,12 +243,14 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, s
     try:
         WebDriverWait(driver, 15).until(
             EC.element_to_be_clickable(
-                (By.CSS_SELECTOR, "[aria-labelledby='select2-planilla_ingreso-container']")
+                (By.CSS_SELECTOR,
+                 "[aria-labelledby='select2-planilla_ingreso-container']")
             )
         )
         logger.debug("✅ Select2 planilla_ingreso listo")
     except Exception:
-        logger.warning("⚠ Timeout esperando select2 planilla_ingreso — intentando de todas formas")
+        logger.warning(
+            "⚠ Timeout esperando select2 planilla_ingreso — intentando de todas formas")
 
     if not buscar_opcion_select(driver, "planilla_ingreso", service, fecha_buscar=fecha_planilla):
         logger.warning(
@@ -303,7 +305,8 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, s
         if not buscar_opcion_select_lectura(driver, "usuario_lectura", firmante_limpio):
             logger.warning(
                 "⚠ No se pudo seleccionar firmante: '%s'", firmante_limpio)
-            raise (Exception(f"No se encontro el firmante: '{firmante_limpio}'"))
+            raise (
+                Exception(f"No se encontro el firmante: '{firmante_limpio}'"))
 
     # 7. Adjuntar archivo
     input_file.send_keys(pdf["ruta"])
@@ -339,110 +342,176 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, s
 # Función pública principal
 # ---------------------------------------------------------------------------
 
-def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
+def subir_pdfs(driver, wait, pdfs: list[dict], max_reintentos: int = 2) -> tuple[int, int, int, int, "UploadReport", str]:
     """
     Itera la lista de PDFs descargados de Sentinel y sube cada uno a CEMDE
     completando el formulario de ayuda diagnóstica.
 
+    Al terminar el loop principal, los PDFs que fallaron se reintentan hasta
+    `max_reintentos` veces (default: 2). Solo se reportan como fallidos
+    definitivos los que siguen fallando tras todos los intentos.
+
     Args:
-        driver : instancia de Selenium WebDriver (ya autenticado en CEMDE).
-        wait   : WebDriverWait asociado.
-        pdfs   : lista de dicts producida por procesar_tabla_sentinel().
+        driver         : instancia de Selenium WebDriver (ya autenticado en CEMDE).
+        wait           : WebDriverWait asociado.
+        pdfs           : lista de dicts producida por procesar_tabla_sentinel().
+        max_reintentos : número de pasadas adicionales sobre los fallidos (default: 2).
 
     Returns:
-        Tupla (exitosos, fallidos).
+        Tupla (exitosos, fallidos, rechazados, procesados, report, ruta_reporte).
     """
     exitosos = 0
     fallidos = 0
     rechazados = 0
     procesados = 0
-    report = UploadReport()                                            # ← NUEVO
+    report = UploadReport()
 
-    for idx, pdf in enumerate(pdfs, start=1):
-        cedula = pdf["cedula"]
-        tipo_examen = pdf["examen"]
-        fecha_atencion = pdf["fecha_atencion"]
-        fecha_busqueda = fecha_solo_dia(fecha_atencion)
-        estado = pdf.get("estado", "CONFIRMADO")
-        firmante = pdf.get("firmante", None)
+    # Errores que NO tienen sentido reintentar (fallos de lógica/datos, no de timing)
+    ERRORES_NO_REINTENTABLES = (
+        "No se pudo seleccionar equipo HOLTER",
+        "No se pudo seleccionar marca para examen MAPA",
+        "El examen esta rechazado pero no se pudo agregar la nota aclaratoria",
+        "No se pudo completar el diagnóstico",
+    )
 
-        logger.info("─" * 50)
-        logger.info(
-            "📤 Subiendo PDF %d/%d | %s | Cédula: %s | Examen: %s | Fecha: %s",
-            idx, len(pdfs), pdf["nombre"], cedula, tipo_examen, fecha_atencion,
-        )
+    def _es_reintentable(error: str) -> bool:
+        """Devuelve True si el error es transitorio y vale la pena reintentar."""
+        return not any(patron in error for patron in ERRORES_NO_REINTENTABLES)
 
-        try:
-            # 1. Abrir paciente
-            abrir_paciente(driver, wait, cedula)
+    def _procesar_lote(lote: list[dict], total_global: int, intento: int) -> list[dict]:
+        """
+        Procesa un lote de PDFs. Devuelve la lista de los que fallaron
+        y son reintentables para la siguiente pasada.
+        """
+        nonlocal exitosos, fallidos, rechazados, procesados
 
-            # ── Flujo RECHAZADO ──────────────────────────────────────────
-            if estado == "RECHAZADO":
-                ok = agregar_nota_aclaratoria_rechazado(
+        pendientes_reintento: list[dict] = []
+
+        for idx, pdf in enumerate(lote, start=1):
+            cedula = pdf["cedula"]
+            tipo_examen = pdf["examen"]
+            fecha_atencion = pdf["fecha_atencion"]
+            fecha_busqueda = fecha_solo_dia(fecha_atencion)
+            estado = pdf.get("estado", "CONFIRMADO")
+            firmante = pdf.get("firmante", None)
+
+            prefijo = f"[Intento {intento}]" if intento > 1 else ""
+            logger.info("─" * 50)
+            logger.info(
+                "📤 %s Subiendo PDF %d/%d | %s | Cédula: %s | Examen: %s | Fecha: %s",
+                prefijo, idx, len(
+                    lote), pdf["nombre"], cedula, tipo_examen, fecha_atencion,
+            )
+
+            try:
+                # 1. Abrir paciente
+                abrir_paciente(driver, wait, cedula)
+
+                # ── Flujo RECHAZADO ──────────────────────────────────────
+                if estado == "RECHAZADO":
+                    ok = agregar_nota_aclaratoria_rechazado(
+                        driver, wait, fecha_busqueda, tipo_examen
+                    )
+                    if ok:
+                        rechazados += 1
+                        report.reject(pdf)
+                        logger.info(
+                            "✅ Nota aclaratoria agregada (%d/%d) | Cédula: %s | Examen: %s",
+                            idx, len(lote), cedula, tipo_examen,
+                        )
+                    else:
+                        # Los rechazados con fallo de nota no se reintentan
+                        fallidos += 1
+                        report.fail(pdf, Exception(
+                            "El examen esta rechazado pero no se pudo agregar la nota aclaratoria"))
+                        logger.warning(
+                            "⚠ No se pudo agregar nota aclaratoria | Cédula: %s | Examen: %s",
+                            cedula, tipo_examen,
+                        )
+                    continue
+
+                # ── Flujo CONFIRMADO / RECONFIRMADO ──────────────────────
+                # 2. Obtener sede
+                sede, fecha_celda_fallback = obtener_sede(
+                    driver, wait, fecha_busqueda)
+                if not sede:
+                    logger.warning(
+                        "⚠ No se pudo determinar la sede del paciente")
+
+                # 3. Número Sentinel desde nota de enfermería
+                sentinel_data = obtener_numero_sentinel(
                     driver, wait, fecha_busqueda, tipo_examen
                 )
-                if ok:
-                    rechazados += 1
-                    report.reject(pdf)
-                    logger.info(
-                        "✅ Nota aclaratoria agregada (%d/%d) | Cédula: %s | Examen: %s",
-                        idx, len(pdfs), cedula, tipo_examen,
+
+                # 4. Navegar al formulario y completarlo
+                if not _abrir_formulario_otros_ad(driver, wait, fecha_busqueda, tipo_examen):
+                    logger.info("⏭ Omitiendo carga de PDF para este examen.")
+                    procesados += 1
+                    report.already(pdf)
+                    continue
+
+                _completar_formulario(
+                    driver, wait, pdf, sentinel_data, sede, firmante, fecha_celda_fallback)
+
+                exitosos += 1
+                report.ok(pdf)
+                logger.info(
+                    "✅ PDF subido correctamente (%d/%d) | Cédula: %s | Examen: %s",
+                    idx, len(lote), cedula, tipo_examen,
+                )
+
+            except Exception as e:
+                error_msg = str(e)
+                if intento <= max_reintentos and _es_reintentable(error_msg):
+                    # No contabilizar aún, se reintentará
+                    pendientes_reintento.append(pdf)
+                    logger.warning(
+                        "⚠ Fallo transitorio (se reintentará) | Cédula: %s | Archivo: %s | Error: %s",
+                        cedula, pdf["nombre"], error_msg,
                     )
                 else:
+                    # Fallo definitivo: ya agotó reintentos o error no reintentable
                     fallidos += 1
-                    report.fail(pdf, Exception(
-                        "El examen esta rechazado pero no se pudo agregar la nota aclaratoria"))
-                    logger.warning(
-                        "⚠ No se pudo agregar nota aclaratoria | Cédula: %s | Examen: %s",
-                        cedula, tipo_examen,
+                    report.fail(pdf, e)
+                    logger.error(
+                        "❌ Error definitivo | Cédula: %s | Archivo: %s | Error: %s",
+                        cedula, pdf["nombre"], error_msg,
+                        exc_info=True,
                     )
-                continue
 
-            # ── Flujo CONFIRMADO / RECONFIRMADO ──────────────────────────
-            # 2. Obtener sede
-            sede, fecha_celda_fallback = obtener_sede(driver, wait, fecha_busqueda)
-            if not sede:
-                logger.warning("⚠ No se pudo determinar la sede del paciente")
+        return pendientes_reintento
 
-            # 3. Número Sentinel desde nota de enfermería (solo HOLTER / MAPA)
-            sentinel_data = obtener_numero_sentinel(
-                driver, wait, fecha_busqueda, tipo_examen
-            )
+    # ── Pasada principal ─────────────────────────────────────────────────────
+    pendientes = _procesar_lote(pdfs, len(pdfs), intento=1)
 
-            # sentinel_numero = sentinel_data["numero_sentinel"] if sentinel_data else None
-            # codigo_diagnostico = sentinel_data["codigo_diagnostico"] if sentinel_data else None
+    # ── Pasadas de reintento ──────────────────────────────────────────────────
+    for intento in range(2, max_reintentos + 2):
+        if not pendientes:
+            break
 
-            # 4. Navegar al formulario y completarlo
-            if not _abrir_formulario_otros_ad(driver, wait, fecha_busqueda, tipo_examen):
-                logger.info("⏭ Omitiendo carga de PDF para este examen.")
-                procesados += 1
-                report.already(pdf)                                       # ← NUEVO
-                continue
+        logger.info("=" * 60)
+        logger.info(
+            "🔄 REINTENTO %d/%d — %d PDF(s) pendiente(s)",
+            intento - 1, max_reintentos, len(pendientes),
+        )
+        logger.info("=" * 60)
 
-            _completar_formulario(
-                driver, wait, pdf, sentinel_data, sede, firmante, fecha_celda_fallback)
+        time.sleep(3)  # Pequeña pausa antes de reintentar
+        pendientes = _procesar_lote(pendientes, len(pdfs), intento=intento)
 
-            exitosos += 1
-            report.ok(pdf)                                            # ← NUEVO
-            logger.info(
-                "✅ PDF subido correctamente (%d/%d) | Cédula: %s | Examen: %s",
-                idx, len(pdfs), cedula, tipo_examen,
-            )
+    # Si tras todos los reintentos aún quedan pendientes, son fallidos definitivos
+    for pdf in pendientes:
+        fallidos += 1
+        report.fail(pdf, Exception("Falló en todos los reintentos"))
+        logger.error(
+            "❌ Fallido tras %d reintento(s) | Cédula: %s | Archivo: %s",
+            max_reintentos, pdf["cedula"], pdf["nombre"],
+        )
 
-        except Exception as e:
-            fallidos += 1
-            report.fail(pdf, e)                                       # ← NUEVO
-            logger.error(
-                "❌ Error subiendo PDF %d/%d | Cédula: %s | Archivo: %s | Error: %s",
-                idx, len(pdfs), cedula, pdf["nombre"], e,
-                exc_info=True,
-            )
-
-    # ── Guardar reporte al finalizar ─────────────────────────────────────── NUEVO
+    # ── Guardar reporte ───────────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     ruta_reporte = os.path.join("logs", f"reporte_{timestamp}.txt")
     report.guardar(ruta_reporte)
     logger.info("📋 Reporte guardado en: %s", ruta_reporte)
-    # ─────────────────────────────────────────────────────────────────────────
 
     return exitosos, fallidos, rechazados, procesados, report, ruta_reporte
