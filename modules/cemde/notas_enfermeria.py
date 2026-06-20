@@ -151,11 +151,14 @@ def _get_field_value(driver, label: str) -> str:
         return ""
 
 
-def agregar_nota_aclaratoria_rechazado(driver, wait, fecha_busqueda: str, tipo_examen: str) -> bool:
+def agregar_nota_aclaratoria_rechazado(driver, wait, fecha_busqueda: str, tipo_examen: str) -> str:
     """
     Recorre las notas de enfermería y, en la nota que coincida con fecha y
-    servicio, hace clic en 'Agregar nota aclaratoria', escribe 'rechazado'
-    en el editor CKEditor y guarda.
+    servicio, valida primero si ya existe una nota aclaratoria (botón
+    'Ver Notas Aclaratorias' / btnNotas). Si ya existe, no hace nada más
+    (no se reabre ni se reescribe). Si no existe, hace clic en
+    'Agregar nota aclaratoria', escribe 'rechazado' en el editor CKEditor
+    y guarda.
 
     Args:
         driver         : instancia de Selenium WebDriver.
@@ -164,7 +167,9 @@ def agregar_nota_aclaratoria_rechazado(driver, wait, fecha_busqueda: str, tipo_e
         tipo_examen    : "HOLTER" o "MAPA".
 
     Returns:
-        True si se guardó la nota aclaratoria, False si no se encontró nota válida.
+        "agregada"      si se escribió y guardó la nota aclaratoria.
+        "ya_existia"    si la fila ya tenía nota aclaratoria (botón btnNotas presente).
+        "no_encontrada" si no se halló una fila de nota válida (fecha/servicio).
     """
     logger.debug(
         "Buscando nota para agregar aclaratoria | examen: %s", tipo_examen)
@@ -226,7 +231,18 @@ def agregar_nota_aclaratoria_rechazado(driver, wait, fecha_busqueda: str, tipo_e
         finally:
             _cerrar_y_volver(driver, ventana_principal)
 
-        # ── Servicio coincide: ahora clic en "Agregar nota aclaratoria" ──
+        # ── Validar si la fila YA tiene nota aclaratoria (botón btnNotas) ──
+        botones_ver_notas = fila.find_elements(
+            By.XPATH, ".//button[contains(@class,'btnNotas')]"
+        )
+        if botones_ver_notas:
+            logger.info(
+                "ℹ️ Ya existe nota aclaratoria para fecha %s | examen: %s — se marca como ya procesado",
+                fecha_busqueda, tipo_examen,
+            )
+            return "ya_existia"
+
+        # ── No existe nota aclaratoria: clic en "Agregar nota aclaratoria" ──
         logger.info("✅ Servicio coincide, agregando nota aclaratoria")
 
         boton_aclaratoria = fila.find_element(
@@ -264,10 +280,10 @@ def agregar_nota_aclaratoria_rechazado(driver, wait, fecha_busqueda: str, tipo_e
 
         logger.info("💾 Nota aclaratoria guardada para fecha %s | examen: %s",
                     fecha_busqueda, tipo_examen)
-        return True
+        return "agregada"
 
     logger.warning(
         "⚠ No se encontró nota válida para agregar aclaratoria | fecha: %s | examen: %s",
         fecha_busqueda, tipo_examen,
     )
-    return False
+    return "no_encontrada"

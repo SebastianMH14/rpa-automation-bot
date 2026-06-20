@@ -409,14 +409,21 @@ def subir_pdfs(driver, wait, pdfs: list[dict], max_reintentos: int = 2) -> tuple
 
                 # ── Flujo RECHAZADO ──────────────────────────────────────
                 if estado == "RECHAZADO":
-                    ok = agregar_nota_aclaratoria_rechazado(
+                    resultado = agregar_nota_aclaratoria_rechazado(
                         driver, wait, fecha_busqueda, tipo_examen
                     )
-                    if ok:
+                    if resultado == "agregada":
                         rechazados += 1
                         report.reject(pdf)
                         logger.info(
                             "✅ Nota aclaratoria agregada (%d/%d) | Cédula: %s | Examen: %s",
+                            idx, len(lote), cedula, tipo_examen,
+                        )
+                    elif resultado == "ya_existia":
+                        procesados += 1
+                        report.already(pdf)
+                        logger.info(
+                            "🔁 Nota aclaratoria ya existía, se marca como ya procesado (%d/%d) | Cédula: %s | Examen: %s",
                             idx, len(lote), cedula, tipo_examen,
                         )
                     else:
