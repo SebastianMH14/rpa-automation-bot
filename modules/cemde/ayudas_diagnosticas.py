@@ -1,12 +1,14 @@
 import logging
 import time
+from selenium.common import StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
 from config.settings import SERVICIOS_EXAMEN, SERVICIO_DEFAULT
 from modules.cemde.paciente import abrir_paciente, obtener_sede, seleccionar_sede
-from modules.cemde.notas_enfermeria import obtener_numero_sentinel
-from utils.select2 import buscar_opcion_select
+from modules.cemde.notas_enfermeria import agregar_nota_aclaratoria_rechazado, obtener_numero_sentinel
+from utils.select2 import buscar_opcion_select, _limpiar_nombre_firmante, _normalizar_nombre_busqueda, buscar_opcion_select_lectura
 from utils.fecha import fecha_solo_dia, sentinel_a_input
 from utils.radio import marcar_radio
 from utils.fecha import parse_fecha
@@ -15,6 +17,12 @@ from datetime import datetime
 import os
 
 logger = logging.getLogger("bot")
+
+
+class _FalloSistematico(Exception):
+    """Se lanza cuando hay demasiados fallos consecutivos seguidos, señal de
+    que el problema es estructural (ej. CEMDE caído o cambio de interfaz) y
+    no tiene sentido seguir reintentando registro por registro."""
 
 
 def _abrir_formulario_otros_ad(driver, wait, fecha_examen: str, tipo_examen: str) -> bool:
@@ -116,68 +124,105 @@ def _verificar_y_completar_diagnostico(driver, wait, codigo_diagnostico: str | N
     Si no tiene nada y se dispone de codigo_diagnostico, lo busca y selecciona.
     """
     try:
-        select_diag = driver.find_element(By.ID, "diagnostico")
-        opciones_seleccionadas = select_diag.find_elements(
-            By.CSS_SELECTOR, "option[selected]"
+
+        # ✅ Verificar selección en el contenedor visual de Select2,
+        # NO en el <select> oculto (que siempre está vacío visualmente)
+        rendered_items = driver.find_elements(
+            By.CSS_SELECTOR,
+            ".select2-selection__rendered .select2-selection__choice"
         )
 
-        if opciones_seleccionadas:
+        if rendered_items:
             logger.debug(
                 "✔ Diagnóstico ya seleccionado: '%s'",
-                opciones_seleccionadas[0].text
+                rendered_items[0].get_attribute(
+                    "title") or rendered_items[0].text
             )
-            return
+            return True
 
-        # No hay nada seleccionado
         if not codigo_diagnostico:
             logger.warning(
                 "⚠ Diagnóstico vacío y no se dispone de codigo_diagnostico")
-            return
+            return False
 
         logger.debug("Diagnóstico vacío. Buscando código: '%s'",
                      codigo_diagnostico)
 
-        # Buscar usando el input de Select2
+        # ✅ Clic en el contenedor Select2 para abrirlo (más confiable que buscar el input directamente)
+        select2_container = wait.until(
+            EC.element_to_be_clickable((
+                By.CSS_SELECTOR,
+                "#diagnostico + .select2-container .select2-selection"
+            ))
+        )
+        select2_container.click()
+        time.sleep(0.3)
+
+        # ✅ Re-localizar el input DESPUÉS del clic para evitar stale reference
         search_input = wait.until(
             EC.presence_of_element_located((
                 By.CSS_SELECTOR,
-                "#diagnostico + .select2-container .select2-search__field"
+                ".select2-container--open .select2-search__field"
             ))
         )
-        search_input.click()
-        # Mínimo 3 chars para sugerir
         search_input.send_keys(codigo_diagnostico[:4])
-        time.sleep(1.5)  # Esperar que carguen las sugerencias
+        time.sleep(1.5)  # Esperar sugerencias del servidor
 
-        # Esperar y seleccionar la primera opción que contenga el código
+        # ✅ Esperar que aparezca el dropdown con resultados (no "Searching..." ni vacío)
+        wait.until(
+            EC.presence_of_element_located((
+                By.CSS_SELECTOR,
+                ".select2-results__option:not(.select2-results__message)"
+            ))
+        )
+
+        # ✅ Re-localizar el resultado justo antes de hacer clic (evita stale)
         resultado = wait.until(
             EC.element_to_be_clickable((
                 By.XPATH,
                 f"//li[contains(@class,'select2-results__option') and contains(., '{codigo_diagnostico}')]"
             ))
         )
+
+        resultado_texto = resultado.text  # ✅ Leer el texto ANTES de hacer clic
         resultado.click()
-        logger.debug("✔ Diagnóstico seleccionado: '%s'", resultado.text)
+
+        logger.debug("✔ Diagnóstico seleccionado: '%s'", resultado_texto)
+        return True
+
+    except StaleElementReferenceException:
+        # ✅ Retry automático en caso de stale
+        logger.warning("⚠ StaleElementReference detectado, reintentando...")
+        time.sleep(1)
+        return _verificar_y_completar_diagnostico(driver, wait, codigo_diagnostico)
 
     except Exception as e:
         logger.error("❌ Error al completar diagnóstico: %s", e)
+        return False
 
 
-def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None, codigo_diagnostico: str | None, sede: str | None) -> None:
+def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, sede: str | None, firmante: str | None, fecha_celda_fallback: str | None = None) -> None:
     """
     Rellena todos los campos del formulario de carga de ayuda diagnóstica
     y lo envía.
 
     Args:
         pdf             : dict con claves examen, fecha_atencion, ruta.
-        sentinel_numero : número Sentinel extraído de la nota de enfermería (puede ser None).
+        sentinel_data   : dict con datos del número Sentinel (puede ser None).
         codigo_diagnostico : código de diagnóstico extraído de la nota de enfermería (puede ser None).
         sede            : nombre de la sede a seleccionar (puede ser None).
+        firmante        : nombre del firmante (puede ser None).
     """
     tipo_examen = pdf["examen"]
     fecha_atencion = pdf["fecha_atencion"]
     fecha_busqueda = fecha_solo_dia(fecha_atencion)   # DD/MM/YYYY
     date_examen = sentinel_a_input(fecha_atencion)  # YYYY-MM-DD para el input
+    sentinel_numero = sentinel_data.get(
+        "numero_sentinel") if sentinel_data else None
+    codigo_diagnostico = sentinel_data.get(
+        "codigo_diagnostico") if sentinel_data else None
+    equipo = sentinel_data.get("equipo") if sentinel_data else None
+    marca = sentinel_data.get("marca") if sentinel_data else None
 
     service = SERVICIOS_EXAMEN.get(tipo_examen, SERVICIO_DEFAULT)
     logger.debug("Servicio a seleccionar: '%s' | Fecha examen: %s",
@@ -190,10 +235,34 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None, 
         logger.warning(
             "⚠ No se pudo seleccionar la sede '%s'. Continuando sin seleccionar sede.", sede)
 
-    # 1. Planilla de ingreso (servicio + fecha)
-    if not buscar_opcion_select(driver, "planilla_ingreso", service, fecha_buscar=date_examen):
+    # Si obtener_sede entró por fallback (Fecha Rep), usar la fecha de la celda
+    # en lugar de la fecha de atención del PDF para buscar la planilla de ingreso
+    fecha_planilla = fecha_celda_fallback if fecha_celda_fallback else date_examen
+    if fecha_celda_fallback:
+        logger.info(
+            "📅 Fallback activo: usando fecha_celda '%s' en lugar de date_examen '%s' "
+            "para planilla_ingreso", fecha_celda_fallback, date_examen
+        )
+
+    # Esperar a que el select2 de planilla_ingreso esté disponible y clickeable
+    # (el cambio de sede puede recargar/re-renderizar el formulario)
+    try:
+        WebDriverWait(driver, 15).until(
+            EC.element_to_be_clickable(
+                (By.CSS_SELECTOR,
+                 "[aria-labelledby='select2-planilla_ingreso-container']")
+            )
+        )
+        logger.debug("✅ Select2 planilla_ingreso listo")
+    except Exception:
+        logger.warning(
+            "⚠ Timeout esperando select2 planilla_ingreso — intentando de todas formas")
+
+    if not buscar_opcion_select(driver, "planilla_ingreso", service, fecha_buscar=fecha_planilla):
         logger.warning(
             "⚠ No se pudo seleccionar planilla_ingreso: '%s'", service)
+        raise Exception(
+            f"No se pudo seleccionar planilla_ingreso: '{service} con la fecha {fecha_planilla}'")
 
     # 2. Fecha de elaboración
     fecha_input = wait.until(
@@ -219,22 +288,31 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None, 
                 "❌ No se pudo seleccionar select_servicio_id: '%s'", service)
 
     # 5. Selects específicos por tipo de examen
-    if tipo_examen == "HOLTER":
-        if not buscar_opcion_select(driver, "select_equipo_medico_id", "HOLTER"):
-            logger.warning("⚠ No se pudo seleccionar equipo HOLTER")
-            return
+    # if tipo_examen == "HOLTER":
+    if not buscar_opcion_select(driver, "select_equipo_medico_id", equipo):
+        logger.warning("⚠ No se pudo seleccionar equipo HOLTER")
+        raise (Exception("No se pudo seleccionar equipo HOLTER"))
 
-    if tipo_examen == "MAPA":
-        if not buscar_opcion_select(driver, "select_marca_equipo", "SPACELABS HEALTHCARE"):
-            logger.warning("⚠ No se pudo seleccionar marca para examen MAPA")
-            return
+    # if tipo_examen == "MAPA":
+    if not buscar_opcion_select(driver, "select_marca_equipo", marca):
+        logger.warning("⚠ No se pudo seleccionar marca para examen MAPA")
+        raise (Exception("No se pudo seleccionar marca para examen MAPA"))
 
     # 6. Código serial / número Sentinel
-    if sentinel_numero:
-        if not buscar_opcion_select(driver, "select_codigo_serial", sentinel_numero):
+    # if sentinel_numero and tipo_examen in ("HOLTER"):
+    if not buscar_opcion_select(driver, "select_codigo_serial", sentinel_numero):
+        logger.warning(
+            "⚠ No se pudo seleccionar número Sentinel: '%s'", sentinel_numero)
+        raise (Exception(f"No se encontro el serial: '{sentinel_numero}'"))
+
+    if firmante:
+        firmante_limpio = _limpiar_nombre_firmante(firmante)
+        firmante_limpio = _normalizar_nombre_busqueda(firmante_limpio)
+        if not buscar_opcion_select_lectura(driver, "usuario_lectura", firmante_limpio):
             logger.warning(
-                "⚠ No se pudo seleccionar número Sentinel: '%s'", sentinel_numero)
-            return
+                "⚠ No se pudo seleccionar firmante: '%s'", firmante_limpio)
+            raise (
+                Exception(f"No se encontro el firmante: '{firmante_limpio}'"))
 
     # 7. Adjuntar archivo
     input_file.send_keys(pdf["ruta"])
@@ -254,11 +332,29 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None, 
     marcar_radio(driver, input_radio, ins_si)
 
     # 9. Diagnóstico (si aplica y no está prellenado)
-    _verificar_y_completar_diagnostico(driver, wait, codigo_diagnostico)
+    if not _verificar_y_completar_diagnostico(driver, wait, codigo_diagnostico):
+        logger.warning(
+            "⚠ No se pudo completar el diagnóstico para este examen.")
+        raise Exception("No se pudo completar el diagnóstico")
 
     # 10. Guardar
-    btn_guardar = driver.find_element(
-        By.CSS_SELECTOR, "input[type='submit'].btn.green")
+    # CEMDE cambió el botón de <input type=submit> a <button type=submit>,
+    # y la página tiene varios botones ocultos con la misma clase 'btn green'
+    # en otros modales/formularios — por eso se filtra por visibilidad en
+    # vez de confiar en que el primer match del DOM sea el correcto.
+    candidatos_guardar = wait.until(
+        EC.presence_of_all_elements_located(
+            (By.CSS_SELECTOR,
+             "input[type='submit'].btn.green, button[type='submit'].btn.green")
+        )
+    )
+    btn_guardar = next(
+        (b for b in candidatos_guardar if b.is_displayed() and b.is_enabled()),
+        None,
+    )
+    if btn_guardar is None:
+        raise Exception(
+            "No se encontró el botón 'Guardar' visible del formulario")
     btn_guardar.click()
     time.sleep(5)
 
@@ -267,81 +363,234 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_numero: str | None, 
 # Función pública principal
 # ---------------------------------------------------------------------------
 
-def subir_pdfs(driver, wait, pdfs: list[dict]) -> tuple[int, int]:
+def subir_pdfs(
+    driver, wait, pdfs: list[dict], max_reintentos: int = 2,
+    umbral_fallos_consecutivos: int = 8,
+) -> tuple[int, int, int, int, "UploadReport", str]:
     """
     Itera la lista de PDFs descargados de Sentinel y sube cada uno a CEMDE
     completando el formulario de ayuda diagnóstica.
 
+    Al terminar el loop principal, los PDFs que fallaron se reintentan hasta
+    `max_reintentos` veces (default: 2). Solo se reportan como fallidos
+    definitivos los que siguen fallando tras todos los intentos.
+
+    Si se acumulan `umbral_fallos_consecutivos` fallos seguidos sin ningún
+    éxito/rechazo/ya-procesado en medio, se asume que el problema es
+    estructural (ej. CEMDE caído, cambio de interfaz) y se aborta el proceso
+    de inmediato en vez de agotar todas las pasadas de reintento sobre el
+    resto de la lista — evita quemar horas repitiendo el mismo fallo cientos
+    de veces.
+
     Args:
-        driver : instancia de Selenium WebDriver (ya autenticado en CEMDE).
-        wait   : WebDriverWait asociado.
-        pdfs   : lista de dicts producida por procesar_tabla_sentinel().
+        driver                      : instancia de Selenium WebDriver (ya autenticado en CEMDE).
+        wait                        : WebDriverWait asociado.
+        pdfs                        : lista de dicts producida por procesar_tabla_sentinel().
+        max_reintentos              : número de pasadas adicionales sobre los fallidos (default: 2).
+        umbral_fallos_consecutivos  : fallos seguidos que disparan el aborto temprano (default: 8).
 
     Returns:
-        Tupla (exitosos, fallidos).
+        Tupla (exitosos, fallidos, rechazados, procesados, report, ruta_reporte).
     """
     exitosos = 0
     fallidos = 0
-    report = UploadReport()                                            # ← NUEVO
+    rechazados = 0
+    procesados = 0
+    fallos_consecutivos = 0
+    abortado_por: str | None = None
+    report = UploadReport()
 
-    for idx, pdf in enumerate(pdfs, start=1):
-        cedula = pdf["cedula"]
-        tipo_examen = pdf["examen"]
-        fecha_atencion = pdf["fecha_atencion"]
-        fecha_busqueda = fecha_solo_dia(fecha_atencion)
+    # Errores que NO tienen sentido reintentar (fallos de lógica/datos, no de timing)
+    ERRORES_NO_REINTENTABLES = (
+        "No se pudo seleccionar equipo HOLTER",
+        "No se pudo seleccionar marca para examen MAPA",
+        "El examen esta rechazado pero no se pudo agregar la nota aclaratoria",
+        "No se pudo completar el diagnóstico",
+    )
 
-        logger.info("─" * 50)
+    def _es_reintentable(error: str) -> bool:
+        """Devuelve True si el error es transitorio y vale la pena reintentar."""
+        return not any(patron in error for patron in ERRORES_NO_REINTENTABLES)
+
+    def _registrar_exito() -> None:
+        nonlocal fallos_consecutivos
+        fallos_consecutivos = 0
+
+    def _registrar_fallo(motivo: str) -> None:
+        nonlocal fallos_consecutivos
+        fallos_consecutivos += 1
+        if fallos_consecutivos >= umbral_fallos_consecutivos:
+            raise _FalloSistematico(
+                f"{fallos_consecutivos} fallos consecutivos sin ningún éxito de por medio. "
+                f"Último error: {motivo}"
+            )
+
+    def _procesar_lote(lote: list[dict], total_global: int, intento: int) -> list[dict]:
+        """
+        Procesa un lote de PDFs. Devuelve la lista de los que fallaron
+        y son reintentables para la siguiente pasada.
+        """
+        nonlocal exitosos, fallidos, rechazados, procesados
+
+        pendientes_reintento: list[dict] = []
+
+        for idx, pdf in enumerate(lote, start=1):
+            cedula = pdf["cedula"]
+            tipo_examen = pdf["examen"]
+            fecha_atencion = pdf["fecha_atencion"]
+            fecha_busqueda = fecha_solo_dia(fecha_atencion)
+            estado = pdf.get("estado", "CONFIRMADO")
+            firmante = pdf.get("firmante", None)
+
+            prefijo = f"[Intento {intento}]" if intento > 1 else ""
+            logger.info("─" * 50)
+            logger.info(
+                "📤 %s Subiendo PDF %d/%d | %s | Cédula: %s | Examen: %s | Fecha: %s",
+                prefijo, idx, len(
+                    lote), pdf["nombre"], cedula, tipo_examen, fecha_atencion,
+            )
+
+            try:
+                # 1. Abrir paciente
+                abrir_paciente(driver, wait, cedula)
+
+                # ── Flujo RECHAZADO ──────────────────────────────────────
+                if estado == "RECHAZADO":
+                    resultado = agregar_nota_aclaratoria_rechazado(
+                        driver, wait, fecha_busqueda, tipo_examen
+                    )
+                    if resultado == "agregada":
+                        rechazados += 1
+                        report.reject(pdf)
+                        _registrar_exito()
+                        logger.info(
+                            "✅ Nota aclaratoria agregada (%d/%d) | Cédula: %s | Examen: %s",
+                            idx, len(lote), cedula, tipo_examen,
+                        )
+                    elif resultado == "ya_existia":
+                        procesados += 1
+                        report.already(pdf)
+                        _registrar_exito()
+                        logger.info(
+                            "🔁 Nota aclaratoria ya existía, se marca como ya procesado (%d/%d) | Cédula: %s | Examen: %s",
+                            idx, len(lote), cedula, tipo_examen,
+                        )
+                    else:
+                        # Los rechazados con fallo de nota no se reintentan
+                        fallidos += 1
+                        motivo = "El examen esta rechazado pero no se pudo agregar la nota aclaratoria"
+                        report.fail(pdf, Exception(motivo))
+                        _registrar_fallo(motivo)
+                        logger.warning(
+                            "⚠ No se pudo agregar nota aclaratoria | Cédula: %s | Examen: %s",
+                            cedula, tipo_examen,
+                        )
+                    continue
+
+                # ── Flujo CONFIRMADO / RECONFIRMADO ──────────────────────
+                # 2. Obtener sede
+                sede, fecha_celda_fallback = obtener_sede(
+                    driver, wait, fecha_busqueda)
+                if not sede:
+                    logger.warning(
+                        "⚠ No se pudo determinar la sede del paciente")
+
+                # 3. Número Sentinel desde nota de enfermería
+                sentinel_data = obtener_numero_sentinel(
+                    driver, wait, fecha_busqueda, tipo_examen
+                )
+
+                # 4. Navegar al formulario y completarlo
+                if not _abrir_formulario_otros_ad(driver, wait, fecha_busqueda, tipo_examen):
+                    logger.info("⏭ Omitiendo carga de PDF para este examen.")
+                    procesados += 1
+                    report.already(pdf)
+                    _registrar_exito()
+                    continue
+
+                _completar_formulario(
+                    driver, wait, pdf, sentinel_data, sede, firmante, fecha_celda_fallback)
+
+                exitosos += 1
+                report.ok(pdf)
+                _registrar_exito()
+                logger.info(
+                    "✅ PDF subido correctamente (%d/%d) | Cédula: %s | Examen: %s",
+                    idx, len(lote), cedula, tipo_examen,
+                )
+
+            except _FalloSistematico:
+                raise
+
+            except Exception as e:
+                error_msg = str(e)
+                if intento <= max_reintentos and _es_reintentable(error_msg):
+                    # No contabilizar aún, se reintentará
+                    pendientes_reintento.append(pdf)
+                    logger.warning(
+                        "⚠ Fallo transitorio (se reintentará) | Cédula: %s | Archivo: %s | Error: %s",
+                        cedula, pdf["nombre"], error_msg,
+                    )
+                else:
+                    # Fallo definitivo: ya agotó reintentos o error no reintentable
+                    fallidos += 1
+                    report.fail(pdf, e)
+                    logger.error(
+                        "❌ Error definitivo | Cédula: %s | Archivo: %s | Error: %s",
+                        cedula, pdf["nombre"], error_msg,
+                        exc_info=True,
+                    )
+
+                _registrar_fallo(error_msg)
+
+        return pendientes_reintento
+
+    # ── Pasada principal ─────────────────────────────────────────────────────
+    try:
+        pendientes = _procesar_lote(pdfs, len(pdfs), intento=1)
+    except _FalloSistematico as e:
+        abortado_por = str(e)
+        pendientes = []
+        logger.critical(
+            "⛔ PROCESO ABORTADO POR FALLOS SISTEMÁTICOS: %s", abortado_por)
+
+    # ── Pasadas de reintento ──────────────────────────────────────────────────
+    for intento in range(2, max_reintentos + 2):
+        if not pendientes or abortado_por:
+            break
+
+        logger.info("=" * 60)
         logger.info(
-            "📤 Subiendo PDF %d/%d | %s | Cédula: %s | Examen: %s | Fecha: %s",
-            idx, len(pdfs), pdf["nombre"], cedula, tipo_examen, fecha_atencion,
+            "🔄 REINTENTO %d/%d — %d PDF(s) pendiente(s)",
+            intento - 1, max_reintentos, len(pendientes),
+        )
+        logger.info("=" * 60)
+
+        time.sleep(3)  # Pequeña pausa antes de reintentar
+        try:
+            pendientes = _procesar_lote(pendientes, len(pdfs), intento=intento)
+        except _FalloSistematico as e:
+            abortado_por = str(e)
+            pendientes = []
+            logger.critical(
+                "⛔ PROCESO ABORTADO POR FALLOS SISTEMÁTICOS: %s", abortado_por)
+
+    # Si tras todos los reintentos aún quedan pendientes, son fallidos definitivos
+    for pdf in pendientes:
+        fallidos += 1
+        report.fail(pdf, Exception("Falló en todos los reintentos"))
+        logger.error(
+            "❌ Fallido tras %d reintento(s) | Cédula: %s | Archivo: %s",
+            max_reintentos, pdf["cedula"], pdf["nombre"],
         )
 
-        try:
-            # 1. Abrir paciente
-            abrir_paciente(driver, wait, cedula)
+    if abortado_por:
+        report.marcar_abortado(abortado_por)
 
-            # 2. Obtener sede
-            sede = obtener_sede(driver, wait, fecha_busqueda)
-            if not sede:
-                logger.warning("⚠ No se pudo determinar la sede del paciente")
-
-            # 3. Número Sentinel desde nota de enfermería (solo HOLTER / MAPA)
-            sentinel_data = obtener_numero_sentinel(
-                driver, wait, fecha_busqueda, tipo_examen
-            )
-
-            sentinel_numero = sentinel_data["numero_sentinel"] if sentinel_data else None
-            codigo_diagnostico = sentinel_data["codigo_diagnostico"] if sentinel_data else None
-
-            # 4. Navegar al formulario y completarlo
-            if not _abrir_formulario_otros_ad(driver, wait, fecha_busqueda, tipo_examen):
-                logger.info("⏭ Omitiendo carga de PDF para este examen.")
-                continue
-
-            _completar_formulario(
-                driver, wait, pdf, sentinel_numero, codigo_diagnostico, sede)
-
-            exitosos += 1
-            report.ok(pdf)                                            # ← NUEVO
-            logger.info(
-                "✅ PDF subido correctamente (%d/%d) | Cédula: %s | Examen: %s",
-                idx, len(pdfs), cedula, tipo_examen,
-            )
-
-        except Exception as e:
-            fallidos += 1
-            report.fail(pdf, e)                                       # ← NUEVO
-            logger.error(
-                "❌ Error subiendo PDF %d/%d | Cédula: %s | Archivo: %s | Error: %s",
-                idx, len(pdfs), cedula, pdf["nombre"], e,
-                exc_info=True,
-            )
-
-    # ── Guardar reporte al finalizar ─────────────────────────────────────── NUEVO
+    # ── Guardar reporte ───────────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     ruta_reporte = os.path.join("logs", f"reporte_{timestamp}.txt")
     report.guardar(ruta_reporte)
     logger.info("📋 Reporte guardado en: %s", ruta_reporte)
-    # ─────────────────────────────────────────────────────────────────────────
 
-    return exitosos, fallidos
+    return exitosos, fallidos, rechazados, procesados, report, ruta_reporte

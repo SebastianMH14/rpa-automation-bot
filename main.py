@@ -25,7 +25,9 @@ def main() -> int:
 
         # ── CEMDE ─────────────────────────────────────────────────────────
         login_cemde(driver, wait)
-        exitosos, fallidos = subir_pdfs(driver, wait, pdfs)
+        exitosos, fallidos, rechazados, procesados, reporte, ruta_reporte = subir_pdfs(
+            driver, wait, pdfs
+        )
 
     except Exception as e:
         logger.critical("💥 Error fatal no controlado: %s", e, exc_info=True)
@@ -41,7 +43,16 @@ def main() -> int:
     logger.info("   PDFs procesados : %d", len(pdfs))
     logger.info("   ✅ Exitosos      : %d", exitosos)
     logger.info("   ❌ Fallidos      : %d", fallidos)
+    logger.info("   ⚠️  Rechazados    : %d", rechazados)
+    logger.info("   🔁 Ya procesados : %d", procesados)
     logger.info("=" * 60)
+
+    # ── ENVÍO DE REPORTE POR CORREO ────────────────────────────────────────
+    try:
+        reporte.enviar_email(ruta_reporte)
+        logger.info("📧 Reporte enviado por correo correctamente")
+    except Exception as e:
+        logger.error("📧 No se pudo enviar el reporte por correo: %s", e)
 
     return 0 if fallidos == 0 else 1
 

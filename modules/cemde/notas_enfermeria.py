@@ -5,6 +5,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from config.settings import SERVICIOS_EXAMEN
+from core import driver
 
 logger = logging.getLogger("bot")
 
@@ -38,26 +39,7 @@ def _cerrar_y_volver(driver, ventana_principal: str) -> None:
     logger.debug("Pestaña cerrada. Regresado a ventana principal")
 
 
-def obtener_numero_sentinel(driver, wait, fecha_busqueda: str, tipo_examen: str) -> str | None:
-    """
-    Abre la pestaña de notas de enfermería, encuentra la nota que corresponde
-    a `fecha_busqueda` y al servicio de `tipo_examen`, extrae y devuelve
-    el número Sentinel del campo de observaciones.
-
-    Solo aplica para exámenes HOLTER y MAPA.
-
-    Args:
-        driver         : instancia de Selenium WebDriver.
-        wait           : WebDriverWait asociado.
-        fecha_busqueda : fecha en formato DD/MM/YYYY (solo la parte de día).
-        tipo_examen    : "HOLTER" o "MAPA".
-
-    Returns:
-        El número Sentinel como string, o None si no se encontró.
-    """
-    # if tipo_examen not in ("HOLTER", "MAPA"):
-    #     return None
-
+def obtener_numero_sentinel(driver, wait, fecha_busqueda: str, tipo_examen: str) -> dict | None:
     logger.debug(
         "Buscando nota de enfermería para examen tipo %s", tipo_examen)
 
@@ -99,53 +81,220 @@ def obtener_numero_sentinel(driver, wait, fecha_busqueda: str, tipo_examen: str)
         logger.info("📝 Nota de enfermería abierta para fecha %s",
                     fecha_busqueda)
 
-        # Leer el servicio registrado en la nota
-        servicio_nota = driver.find_element(
-            By.XPATH,
-            "//td[contains(text(),'Servicio')]/following-sibling::td//input",
-        ).get_attribute("value").strip().upper()
+        try:
+            # FIX: Servicio ahora está en <td><b>Servicio</b></td>
+            servicio_nota = driver.find_element(
+                By.XPATH,
+                "//td[b[contains(text(),'Servicio')]]/following-sibling::td//input",
+            ).get_attribute("value").strip().upper()
 
-        logger.info("Servicio en nota: '%s' | Esperado: '%s'",
-                    servicio_nota, servicio_esperado)
+            logger.info("Servicio en nota: '%s' | Esperado: '%s'",
+                        servicio_nota, servicio_esperado)
 
-        # Validar que el servicio coincide con el examen
-        if servicio_esperado not in servicio_nota:
-            logger.warning(
-                "⚠ Servicio NO coincide, buscando siguiente nota | Nota: '%s' | Examen: '%s'",
-                servicio_nota, tipo_examen,
-            )
+            if servicio_esperado not in servicio_nota:
+                logger.warning(
+                    "⚠ Servicio NO coincide | Nota: '%s' | Examen: '%s'",
+                    servicio_nota, tipo_examen,
+                )
+                continue
+
+            logger.info(
+                "✅ Servicio coincide | Nota: '%s' | Examen: '%s'", servicio_nota, tipo_examen)
+
+            # observaciones = driver.find_element(
+            #     By.CLASS_NAME, "observaciones_nota_enfermeria"
+            # ).text
+
+            diagnostico_raw = driver.find_element(
+                By.XPATH,
+                "//th[contains(text(),'Diagnóstico Principal')]/following-sibling::td//textarea"
+            ).get_attribute("value").strip()
+
+            partes = diagnostico_raw.split("-", 1)
+            codigo_diagnostico = partes[0].strip() if partes else ""
+
+            if not codigo_diagnostico:
+                logger.warning(
+                    "⚠ Diagnóstico vacío o sin formato esperado: '%s'", diagnostico_raw)
+
+            logger.info("🧾 Diagnóstico extraído: '%s'", codigo_diagnostico)
+
+            # NUEVO: extraer Equipo, Marca y Serial
+            equipo = _get_field_value(driver, "Equipo")
+            marca = _get_field_value(driver, "Marca")
+            serial = _get_field_value(driver, "Serial")
+
+            logger.info("🔧 Equipo: '%s' | Marca: '%s' | Serial: '%s'",
+                        equipo, marca, serial)
+
+        finally:
             _cerrar_y_volver(driver, ventana_principal)
+
+        return {
+            "numero_sentinel":    serial,  # <-- USO SERIAL COMO FALLBACK
+            "codigo_diagnostico": codigo_diagnostico,
+            "equipo":             equipo,
+            "marca":              marca,
+            "serial":             serial,
+        }
+
+
+def _get_field_value(driver, label: str) -> str:
+    """Extrae el value de un input cuyo th hermano contiene `label`."""
+    try:
+        return driver.find_element(
+            By.XPATH,
+            f"//th[contains(text(),'{label}')]/following-sibling::td//input",
+        ).get_attribute("value").strip()
+    except Exception:
+        logger.warning("⚠ Campo '%s' no encontrado en nota", label)
+        return ""
+
+
+def agregar_nota_aclaratoria_rechazado(driver, wait, fecha_busqueda: str, tipo_examen: str) -> str:
+    """
+    Recorre las notas de enfermería y, en la nota que coincida con fecha y
+    servicio, valida primero si ya existe una nota aclaratoria (botón
+    'Ver Notas Aclaratorias' / btnNotas). Si ya existe, no hace nada más
+    (no se reabre ni se reescribe). Si no existe, hace clic en
+    'Agregar nota aclaratoria', escribe 'rechazado' en el editor CKEditor
+    y guarda.
+
+    Args:
+        driver         : instancia de Selenium WebDriver.
+        wait           : WebDriverWait asociado.
+        fecha_busqueda : fecha en formato DD/MM/YYYY.
+        tipo_examen    : "HOLTER" o "MAPA".
+
+    Returns:
+        "agregada"      si se escribió y guardó la nota aclaratoria.
+        "ya_existia"    si la fila ya tenía nota aclaratoria (botón btnNotas presente).
+        "no_encontrada" si no se halló una fila de nota válida (fecha/servicio).
+    """
+    logger.debug(
+        "Buscando nota para agregar aclaratoria | examen: %s", tipo_examen)
+
+    tab_notas = wait.until(
+        EC.element_to_be_clickable(
+            (By.XPATH, "//a[@href='#tab-notas-enfermeria']"))
+    )
+    tab_notas.click()
+
+    wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//table[@id='table']//tbody/tr"))
+    )
+
+    filas_notas = driver.find_elements(
+        By.XPATH, "//table[@id='table']//tbody/tr")
+    logger.debug("Filas de notas encontradas: %d", len(filas_notas))
+
+    servicio_esperado = SERVICIOS_EXAMEN.get(tipo_examen.upper(), "").upper()
+
+    for fila in filas_notas:
+        celdas = fila.find_elements(By.TAG_NAME, "td")
+        if len(celdas) < 3:
             continue
 
-        logger.info("✅ Servicio coincide | Nota: '%s' | Examen: '%s'",
-                    servicio_nota, tipo_examen)
+        fecha_tabla = celdas[0].text.strip()
+        logger.debug("Comparando fecha nota: '%s' con '%s'",
+                     fecha_busqueda, fecha_tabla)
 
-        # Extraer número Sentinel de las observaciones
-        observaciones = driver.find_element(
-            By.CLASS_NAME, "observaciones_nota_enfermeria"
-        ).text
+        if fecha_busqueda != fecha_tabla:
+            continue
 
-        diagnostico_raw = driver.find_element(
-            By.XPATH,  "//th[contains(text(),'Diagnóstico Principal')]/following-sibling::td//textarea").get_attribute("value").strip()
+        # Abrir la nota para verificar el servicio
+        boton_ver = fila.find_element(
+            By.XPATH, ".//a[contains(@href,'notasEnfermerias')]"
+        )
+        ventana_principal = _abrir_nota_en_nueva_ventana(
+            driver, wait, boton_ver)
+        logger.info(
+            "📝 Nota abierta para verificar servicio | fecha: %s", fecha_busqueda)
 
-        codigo_diagnostico = diagnostico_raw.split("-")[0].strip()
+        try:
+            servicio_nota = driver.find_element(
+                By.XPATH,
+                "//td[b[contains(text(),'Servicio')]]/following-sibling::td//input",
+            ).get_attribute("value").strip().upper()
 
-        logger.info("🧾 Diagnóstico extraído: %s", codigo_diagnostico)
+            logger.info("Servicio en nota: '%s' | Esperado: '%s'",
+                        servicio_nota, servicio_esperado)
 
-        _cerrar_y_volver(driver, ventana_principal)
+            if servicio_esperado not in servicio_nota:
+                logger.warning(
+                    "⚠ Servicio NO coincide, buscando siguiente nota | Nota: '%s' | Examen: '%s'",
+                    servicio_nota, tipo_examen,
+                )
+                continue  # finally cierra la ventana antes de seguir
 
-        match = re.search(r"SENTINEL\s*#\s*(\d+)",
-                          observaciones, re.IGNORECASE)
-        if match:
-            numero = match.group(1)
-            logger.info("🔢 Número Sentinel extraído: %s", numero)
-            return {"numero_sentinel": numero, "codigo_diagnostico": codigo_diagnostico}
+        finally:
+            _cerrar_y_volver(driver, ventana_principal)
 
-        logger.warning("⚠ No se encontró número Sentinel en las observaciones")
-        return None  # nota correcta pero sin número → no seguir buscando
+        # ── Validar si la fila YA tiene nota aclaratoria (botón btnNotas) ──
+        botones_ver_notas = fila.find_elements(
+            By.XPATH, ".//button[contains(@class,'btnNotas')]"
+        )
+        if botones_ver_notas:
+            logger.info(
+                "ℹ️ Ya existe nota aclaratoria para fecha %s | examen: %s — se marca como ya procesado",
+                fecha_busqueda, tipo_examen,
+            )
+            return "ya_existia"
+
+        # ── No existe nota aclaratoria: clic en "Agregar nota aclaratoria" ──
+        logger.info("✅ Servicio coincide, agregando nota aclaratoria")
+
+        boton_aclaratoria = fila.find_element(
+            By.XPATH, ".//button[@title='Agregar nota aclaratoria' or @data-original-title='Agregar nota aclaratoria']"
+        )
+        driver.execute_script("arguments[0].click();", boton_aclaratoria)
+
+        # Esperar a que el iframe de CKEditor esté presente
+        wait.until(
+            EC.frame_to_be_available_and_switch_to_it(
+                (By.CSS_SELECTOR, "iframe.cke_wysiwyg_frame")
+            )
+        )
+        logger.debug("Cambiado al iframe de CKEditor")
+
+        # Escribir en el body del iframe
+        body = wait.until(
+            EC.presence_of_element_located((By.TAG_NAME, "body")))
+        body.clear()
+        body.click()
+        body.send_keys("rechazado")
+
+        logger.info("✏ Texto 'rechazado' escrito en nota aclaratoria")
+
+        # Salir del iframe antes de buscar el botón Guardar
+        driver.switch_to.default_content()
+
+        # CEMDE cambió varios botones de submit de <input> a <button>; se
+        # aceptan ambas variantes y se filtra por visibilidad (ver mismo
+        # fix en ayudas_diagnosticas.py::_completar_formulario).
+        candidatos_guardar = wait.until(
+            EC.presence_of_all_elements_located(
+                (By.CSS_SELECTOR,
+                 "input.btn.green[type='submit'][value='Guardar'], "
+                 "button.btn.green[type='submit']")
+            )
+        )
+        boton_guardar = next(
+            (b for b in candidatos_guardar if b.is_displayed() and b.is_enabled()),
+            None,
+        )
+        if boton_guardar is None:
+            raise Exception(
+                "No se encontró el botón 'Guardar' visible de la nota aclaratoria")
+        boton_guardar.click()
+
+        logger.info("💾 Nota aclaratoria guardada para fecha %s | examen: %s",
+                    fecha_busqueda, tipo_examen)
+        return "agregada"
 
     logger.warning(
-        "⚠ No se encontró nota de enfermería válida para fecha %s | examen: %s",
+        "⚠ No se encontró nota válida para agregar aclaratoria | fecha: %s | examen: %s",
         fecha_busqueda, tipo_examen,
     )
-    return None
+    return "no_encontrada"

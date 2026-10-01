@@ -1,6 +1,7 @@
 import logging
 import re
 import time
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from config.settings import URL_PACIENTES
@@ -11,7 +12,14 @@ logger = logging.getLogger("bot")
 
 def abrir_paciente(driver, wait, cedula: str) -> None:
     """
-    Navega a la lista de pacientes, busca por cédula y abre el perfil.
+    Navega a la lista de pacientes, filtra la tabla (#pacientes-table) por
+    cédula usando el buscador de DataTables y abre el perfil del paciente
+    cuya columna 'Documento' coincide EXACTAMENTE con la cédula buscada.
+
+    Nota: la página de pacientes tiene varios <input type='search'> ocultos
+    (buscador global del navbar, campos select2, etc.). El único visible e
+    interactuable es el que DataTables inyecta dentro de '#pacientes-table_filter'
+    — por eso se usa ese selector acotado en vez de 'input[type=search]' a secas.
 
     Raises:
         TimeoutException: si no se encuentra el paciente.
@@ -19,73 +27,150 @@ def abrir_paciente(driver, wait, cedula: str) -> None:
     driver.get(URL_PACIENTES)
     time.sleep(3)
 
-    inp = wait.until(
-        EC.presence_of_element_located(
-            (By.CSS_SELECTOR, "input[type='search']"))
-    )
     cedula = re.sub(r"[^\d]", "", cedula)
-    inp.clear()
-    inp.send_keys(cedula)
 
-    resultado = wait.until(
+    filtro = wait.until(
         EC.element_to_be_clickable(
-            (By.XPATH,
-             f"//ul[@id='lista-pacientes']//a[contains(@class,'list-group-item') "
-             f"and contains(.,'{cedula}')]")
+            (By.CSS_SELECTOR, "#pacientes-table_filter input[type='search']")
         )
     )
-    driver.execute_script("arguments[0].click();", resultado)
-    logger.debug("Paciente abierto: %s", cedula)
+    filtro.click()
+    filtro.clear()
+    filtro.send_keys(cedula)
 
-
-def obtener_sede(driver, wait, fecha_busqueda: str) -> str | None:
-    """
-    En la pestaña de atenciones, busca la fila que coincide con `fecha_busqueda`
-    (formato DD/MM/YYYY) y devuelve la sede correspondiente.
-    """
-    tab = wait.until(EC.element_to_be_clickable(
-        (By.XPATH, "//a[@href='#tab-citas']")))
-    driver.execute_script(
-        "arguments[0].scrollIntoView({block: 'center'});", tab)
-    time.sleep(0.5)
-    try:
-        tab.click()
-    except Exception:
-        driver.execute_script("arguments[0].click();", tab)
-        logger.debug("Tab citas clickeado via JS fallback")
+    # Pausa para el debounce/AJAX de DataTables tras escribir en el filtro.
     time.sleep(2)
 
+    try:
+        fila = wait.until(
+            EC.presence_of_element_located(
+                (By.XPATH,
+                 f"//table[@id='pacientes-table']//tbody/tr["
+                 f"td[3][normalize-space(text())='{cedula}']]")
+            )
+        )
+    except TimeoutException:
+        raise TimeoutException(
+            f"No se encontró ningún paciente con documento exacto '{cedula}' "
+            f"en #pacientes-table tras filtrar."
+        )
+
+    filas_coincidentes = driver.find_elements(
+        By.XPATH,
+        f"//table[@id='pacientes-table']//tbody/tr["
+        f"td[3][normalize-space(text())='{cedula}']]",
+    )
+    if len(filas_coincidentes) > 1:
+        logger.warning(
+            "⚠ Múltiples pacientes (%d) con documento '%s', abriendo el primero",
+            len(filas_coincidentes), cedula,
+        )
+
+    link_ver = fila.find_element(By.CSS_SELECTOR, "a[href*='/pacientes/']")
+    driver.execute_script("arguments[0].click();", link_ver)
+    logger.debug("Paciente abierto: %s", cedula)
+
+    # ── NUEVO: esperar que el perfil esté completamente cargado ──
     wait.until(
         EC.presence_of_element_located(
-            (By.XPATH, "//table[@id='pacientes-table']//tbody/tr/td")
+            (By.XPATH, "//a[@href='#tab-citas']")
         )
     )
+    wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//a[@href='#tab-notas-enfermeria']")
+        )
+    )
+    logger.debug("Perfil del paciente %s completamente cargado", cedula)
+
+
+def obtener_sede(driver, wait, fecha_busqueda: str) -> tuple[str | None, str | None]:
+    def _click_tab_citas():
+        tab = wait.until(EC.element_to_be_clickable(
+            (By.XPATH, "//a[@href='#tab-citas']")))
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center'});", tab)
+        time.sleep(0.5)
+        try:
+            tab.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", tab)
+        time.sleep(2)
+
+    _click_tab_citas()
+
+    MAX_INTENTOS = 3
+    for intento in range(1, MAX_INTENTOS + 1):
+        try:
+            tbody = driver.find_element(
+                By.XPATH, "//table[@id='pacientes-table']//tbody")
+            contenido = tbody.get_attribute("innerHTML")
+            if "No hay datos disponibles" in contenido:
+                logger.warning(
+                    "⚠ Tabla vacía en intento %d/%d — recargando página",
+                    intento, MAX_INTENTOS
+                )
+                driver.refresh()
+                wait.until(EC.presence_of_element_located(
+                    (By.XPATH, "//a[@href='#tab-citas']")))
+                time.sleep(1)
+                _click_tab_citas()
+                continue
+            break
+        except Exception as e:
+            logger.warning(
+                "⚠ Error leyendo tbody en intento %d: %s", intento, e)
+            time.sleep(2)
+    else:
+        logger.warning("⚠ Tabla siguió vacía tras %d intentos para fecha %s",
+                       MAX_INTENTOS, fecha_busqueda)
+        return None, None
 
     filas = driver.find_elements(
         By.XPATH, "//table[@id='pacientes-table']//tbody/tr"
     )
 
+    fecha_objetivo = parse_fecha(fecha_busqueda)
+    if not fecha_objetivo:
+        logger.warning(
+            "⚠ No se pudo parsear fecha_busqueda: %s", fecha_busqueda)
+        return None, None
+
     for fila in filas:
         celdas = fila.find_elements(By.TAG_NAME, "td")
         textos = [c.text.strip() for c in celdas]
-
-        if len(textos) < 3:
+        if len(textos) < 4:
             continue
 
-        fecha_celda_raw = textos[2].split(" ")[0]
-
+        # --- Comparar por columna Fecha (índice 2) ---
+        fecha_celda_raw = textos[2].split()[0]
         fecha_celda = parse_fecha(fecha_celda_raw)
-        fecha_objetivo = parse_fecha(fecha_busqueda)
+        if fecha_celda and fecha_celda.date() == fecha_objetivo.date():
+            sede = textos[3].replace("\n", " ").strip()
+            logger.info("🏥 Sede encontrada por Fecha: %s", sede)
+            return sede, None  # fecha_celda_str=None → no es fallback
 
-        if not fecha_celda or not fecha_objetivo:
-            continue
+        # --- Fallback: comparar por columna Fecha Rep (índice 12) ---
+        if len(textos) > 12:
+            fecha_rep_raw = textos[12].strip()
+            if fecha_rep_raw and fecha_rep_raw.upper() != "N/A":
+                # Tomar solo la parte de fecha (antes del primer espacio)
+                fecha_rep_solo = fecha_rep_raw.split()[0]
+                fecha_rep = parse_fecha(fecha_rep_solo)
+                if fecha_rep and fecha_rep.date() == fecha_objetivo.date():
+                    sede = textos[3].replace("\n", " ").strip()
+                    # Convertir fecha_celda (índice 2) a YYYY-MM-DD para el formulario
+                    fecha_celda_str = fecha_celda.strftime("%Y-%m-%d") if fecha_celda else None
+                    logger.info(
+                        "🏥 Sede encontrada por Fecha Rep: %s (Fecha Rep: %s) | "
+                        "fecha_celda para formulario: %s",
+                        sede, fecha_rep_raw, fecha_celda_str
+                    )
+                    return sede, fecha_celda_str  # fallback activo
 
-        if fecha_celda.date() == fecha_objetivo.date():
-            sede = textos[2]
-            logger.info("🏥 Sede encontrada: %s", sede)
-            return sede
-    logger.warning("⚠ No se encontró sede para fecha %s", fecha_busqueda)
-    return None
+    logger.warning("⚠ No se encontró sede para fecha %s (ni por Fecha ni por Fecha Rep)",
+                   fecha_busqueda)
+    return None, None
 
 
 def seleccionar_sede(driver, wait, sede_objetivo: str) -> bool:

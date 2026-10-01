@@ -23,10 +23,16 @@ if FECHA_LIMITE:
         logger.error(
             "❌ FECHA_LIMITE inválida: '%s'. Use DD/MM/YYYY.", FECHA_LIMITE)
 
+# Índice: clave = "YYYY-MM-DD/nombre_archivo.pdf" → ruta completa
+# Así se distinguen el mismo examen en fechas distintas para un mismo paciente.
 pdfs_existentes = {}
 
 for root, _, files in os.walk(DOWNLOAD_DIR):
     for file in files:
+        fecha_dir = os.path.basename(root)  # carpeta inmediata = YYYY-MM-DD
+        clave = f"{fecha_dir}/{file}"
+        pdfs_existentes[clave] = os.path.join(root, file)
+        # También indexamos solo por nombre para compatibilidad con código legado
         pdfs_existentes[file] = os.path.join(root, file)
 
 
@@ -50,6 +56,19 @@ def _obtener_firmante(driver) -> str | None:
             firmante = celdas[1].text.strip()
             logger.info("✅ Firmante: %s (decisión: %s)", firmante, decision)
             return firmante
+    return None
+
+
+def _firmante_desde_ruta(ruta_pdf: str) -> str | None:
+    """
+    Extrae el nombre del firmante del penúltimo componente de la ruta.
+    Estructura esperada: …/NOMBRE_MEDICO/YYYY-MM-DD/archivo.pdf
+    """
+    partes = os.path.normpath(ruta_pdf).split(os.sep)
+    # partes[-1] = archivo, partes[-2] = fecha, partes[-3] = médico
+    if len(partes) >= 3:
+        carpeta_medico = partes[-3]
+        return carpeta_medico.replace("_", " ") if carpeta_medico != "SIN_FIRMANTE" else None
     return None
 
 
@@ -157,7 +176,6 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
 
         for i in range(len(rows)):
             try:
-                # 🔥 CLAVE: refrescar filas cada vez (como tu función buena)
                 rows = driver.find_elements(By.XPATH, "//rows/row")
                 row = rows[i]
 
@@ -201,13 +219,16 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                     elif texto == "RECONFIRMADO":
                         estado = "RECONFIRMADO"
                         break
+                    elif texto == "RECHAZADO":          # ← NUEVO
+                        estado = "RECHAZADO"
+                        break
 
                 logger.info(
                     "Fila | %s | %s | examen: %s | fecha: %s | estado: %s",
                     nombre, cedula, examen or "(vacío)", fecha_atencion, estado or "(sin estado)"
                 )
 
-                if estado not in ("CONFIRMADO", "RECONFIRMADO"):
+                if estado not in ("CONFIRMADO", "RECONFIRMADO", "RECHAZADO"):
                     total_omitidas += 1
                     if modo_una_sola:
                         return pdfs
@@ -216,17 +237,30 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                 nombre_archivo = f"{cedula}_{nombre}_{examen}".replace(
                     " ", "_") + ".pdf"
 
-                if nombre_archivo in pdfs_existentes:
-                    ruta_pdf = pdfs_existentes[nombre_archivo]
+                # La clave incluye la fecha para permitir el mismo examen en fechas distintas
+                try:
+                    fecha_carpeta_key = datetime.strptime(
+                        fecha_atencion, "%d/%m/%Y %H:%M:%S").strftime("%Y-%m-%d")
+                except ValueError:
+                    fecha_carpeta_key = fecha_atencion
 
-                    logger.info(
-                        "⏭ PDF ya existe, se omite descarga: %s", nombre_archivo)
+                clave_dedup = f"{fecha_carpeta_key}/{nombre_archivo}"
+
+                if clave_dedup in pdfs_existentes:
+                    ruta_pdf = pdfs_existentes[clave_dedup]
+
+                    firmante = _firmante_desde_ruta(ruta_pdf)
+
+                    logger.info("⏭ PDF ya existe, se omite descarga: %s (firmante: %s)",
+                                nombre_archivo, firmante or "desconocido")
                     pdfs.append({
                         "ruta": ruta_pdf,
                         "nombre": nombre_archivo,
                         "cedula": cedula,
                         "examen": examen,
                         "fecha_atencion": fecha_atencion,
+                        "estado": estado,
+                        "firmante": firmante,   # ← NUEVO
                     })
 
                     if modo_una_sola:
@@ -269,6 +303,11 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                 if not descargar_pdf_desde_iframe(driver, ruta_pdf):
                     logger.warning(
                         "⚠ PDF no descargado para %s | %s", nombre, cedula)
+                    total_omitidas += 1
+                    driver.back()
+                    wait.until(EC.presence_of_element_located(
+                        (By.XPATH, "//rows/row")))
+                    continue
 
                 pdfs.append({
                     "ruta": ruta_pdf,
@@ -276,6 +315,8 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                     "cedula": cedula,
                     "examen": examen,
                     "fecha_atencion": fecha_atencion,
+                    "estado": estado,
+                    "firmante": firmante,   # ← NUEVO
                 })
 
                 driver.back()

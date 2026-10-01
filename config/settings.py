@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+from datetime import datetime, timedelta
 
 load_dotenv()
 
@@ -48,9 +49,15 @@ SERVICIO_DEFAULT = "ELECTROCARDIOGRAMA DE RITMO O DE SUPERFICIE SOD"
 # En producción deja este set vacío → el bot procesará TODAS las filas.
 # En desarrollo pon las cédulas que quieres probar.
 CEDULAS_PRUEBA: set[str] = {
-    # "32433182",
-    # "32397940",
-    # "22018038"
 }
 
-FECHA_LIMITE="28/03/2026"
+FECHA_LIMITE = (datetime.today() - timedelta(days=20)).strftime("%d/%m/%Y")
+
+# ================================
+# CORREO (envío de reportes)
+# ================================
+EMAIL_REMITENTE      = os.getenv("EMAIL_REMITENTE")
+EMAIL_PASSWORD       = os.getenv("EMAIL_PASSWORD")
+EMAIL_DESTINATARIOS  = os.getenv("EMAIL_DESTINATARIOS", "")   # separados por coma
+EMAIL_SMTP_HOST      = os.getenv("EMAIL_SMTP_HOST", "smtp.gmail.com")
+EMAIL_SMTP_PORT      = int(os.getenv("EMAIL_SMTP_PORT", "587"))
