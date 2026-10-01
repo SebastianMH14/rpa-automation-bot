@@ -39,6 +39,34 @@ def _cerrar_y_volver(driver, ventana_principal: str) -> None:
     logger.debug("Pestaña cerrada. Regresado a ventana principal")
 
 
+def _esperar_filas_notas_cargadas(driver, wait, timeout: int = 15) -> list:
+    """
+    Espera a que la tabla de notas de enfermería tenga al menos una fila
+    con contenido real, no solo las filas "esqueleto" vacías que DataTables
+    renderiza mientras el AJAX todavía está cargando.
+
+    Confirmado en vivo (2026-10-01): justo tras 'presence_of_element_located'
+    sobre //table[@id='table']//tbody/tr, la tabla puede tener filas con
+    todas las celdas vacías (['', '', '', '']); el contenido real aparece
+    ~2s después. Leer en ese momento hacía que obtener_numero_sentinel
+    nunca encontrara la nota (fecha_tabla == ''), devolviendo sentinel_data
+    = None incluso para HOLTER/MAPA con nota válida — lo que disparaba
+    "No se pudo seleccionar equipo HOLTER" en cascada.
+
+    Devuelve la lista de filas ya cargadas.
+    """
+    WebDriverWait(driver, timeout).until(
+        lambda d: any(
+            fila.find_elements(By.TAG_NAME, "td")
+            and fila.find_elements(By.TAG_NAME, "td")[0].text.strip()
+            for fila in d.find_elements(
+                By.XPATH, "//table[@id='table']//tbody/tr"
+            )
+        )
+    )
+    return driver.find_elements(By.XPATH, "//table[@id='table']//tbody/tr")
+
+
 def obtener_numero_sentinel(driver, wait, fecha_busqueda: str, tipo_examen: str) -> dict | None:
     logger.debug(
         "Buscando nota de enfermería para examen tipo %s", tipo_examen)
@@ -49,13 +77,7 @@ def obtener_numero_sentinel(driver, wait, fecha_busqueda: str, tipo_examen: str)
     )
     tab_notas.click()
 
-    wait.until(
-        EC.presence_of_element_located(
-            (By.XPATH, "//table[@id='table']//tbody/tr"))
-    )
-
-    filas_notas = driver.find_elements(
-        By.XPATH, "//table[@id='table']//tbody/tr")
+    filas_notas = _esperar_filas_notas_cargadas(driver, wait)
     logger.debug("Filas de notas encontradas: %d", len(filas_notas))
 
     servicio_esperado = SERVICIOS_EXAMEN.get(tipo_examen.upper(), "").upper()
@@ -180,13 +202,7 @@ def agregar_nota_aclaratoria_rechazado(driver, wait, fecha_busqueda: str, tipo_e
     )
     tab_notas.click()
 
-    wait.until(
-        EC.presence_of_element_located(
-            (By.XPATH, "//table[@id='table']//tbody/tr"))
-    )
-
-    filas_notas = driver.find_elements(
-        By.XPATH, "//table[@id='table']//tbody/tr")
+    filas_notas = _esperar_filas_notas_cargadas(driver, wait)
     logger.debug("Filas de notas encontradas: %d", len(filas_notas))
 
     servicio_esperado = SERVICIOS_EXAMEN.get(tipo_examen.upper(), "").upper()

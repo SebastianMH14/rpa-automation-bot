@@ -288,22 +288,28 @@ def _completar_formulario(driver, wait, pdf: dict, sentinel_data: dict | None, s
                 "❌ No se pudo seleccionar select_servicio_id: '%s'", service)
 
     # 5. Selects específicos por tipo de examen
-    # if tipo_examen == "HOLTER":
-    if not buscar_opcion_select(driver, "select_equipo_medico_id", equipo):
-        logger.warning("⚠ No se pudo seleccionar equipo HOLTER")
-        raise (Exception("No se pudo seleccionar equipo HOLTER"))
+    # Equipo/marca/serial solo aplican a HOLTER y MAPA (monitoreo ambulatorio
+    # con equipo asociado). ELECTROCARDIOGRAMA (y cualquier otro tipo) no
+    # tiene nota de enfermería con esos datos, así que sentinel_data queda
+    # None y forzar estos selects siempre fallaba (ver incidente 2026-09-30:
+    # "No se pudo seleccionar equipo HOLTER" disparaba el circuit breaker
+    # en cada corrida). Confirmado en vivo que CEMDE acepta el formulario
+    # de ELECTROCARDIOGRAMA sin estos 3 campos ("Formato Guardado
+    # Correctamente").
+    if tipo_examen in ("HOLTER", "MAPA"):
+        if not buscar_opcion_select(driver, "select_equipo_medico_id", equipo):
+            logger.warning("⚠ No se pudo seleccionar equipo HOLTER")
+            raise (Exception("No se pudo seleccionar equipo HOLTER"))
 
-    # if tipo_examen == "MAPA":
-    if not buscar_opcion_select(driver, "select_marca_equipo", marca):
-        logger.warning("⚠ No se pudo seleccionar marca para examen MAPA")
-        raise (Exception("No se pudo seleccionar marca para examen MAPA"))
+        if not buscar_opcion_select(driver, "select_marca_equipo", marca):
+            logger.warning("⚠ No se pudo seleccionar marca para examen MAPA")
+            raise (Exception("No se pudo seleccionar marca para examen MAPA"))
 
-    # 6. Código serial / número Sentinel
-    # if sentinel_numero and tipo_examen in ("HOLTER"):
-    if not buscar_opcion_select(driver, "select_codigo_serial", sentinel_numero):
-        logger.warning(
-            "⚠ No se pudo seleccionar número Sentinel: '%s'", sentinel_numero)
-        raise (Exception(f"No se encontro el serial: '{sentinel_numero}'"))
+        # 6. Código serial / número Sentinel
+        if not buscar_opcion_select(driver, "select_codigo_serial", sentinel_numero):
+            logger.warning(
+                "⚠ No se pudo seleccionar número Sentinel: '%s'", sentinel_numero)
+            raise (Exception(f"No se encontro el serial: '{sentinel_numero}'"))
 
     if firmante:
         firmante_limpio = _limpiar_nombre_firmante(firmante)
