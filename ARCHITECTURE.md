@@ -84,7 +84,6 @@ cambiarlo no se ha validado.
 | `utils/fecha.py` | Conversión entre formatos de fecha de Sentinel/CEMDE |
 | `utils/radio.py` | Marcado de radio buttons estilizados con iCheck (3 estrategias de fallback) |
 | `utils/upload_report.py` | Acumula resultados (`UploadReport`), genera el `.txt` y arma/envía el correo HTML |
-| `alpha.py` | Prototipo monolítico previo a la modularización. **No lo importa `main.py`** — código muerto conservado como referencia histórica, no un segundo punto de entrada |
 
 ## 5. Modelo de datos en memoria
 
@@ -225,8 +224,6 @@ sistemas reales.
 
 ## 10. Deuda técnica conocida
 
-- `alpha.py` es código muerto; candidato a eliminar o mover a una carpeta
-  `legacy/`.
 - La descarga de PDF (`modules/sentinel/pdf_downloader.py`) usa
   `requests.get(..., verify=False)`, desactivando la verificación TLS —
   aceptado porque CEMDE se accede por IP directa, pero vale la pena

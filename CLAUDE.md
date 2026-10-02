@@ -55,9 +55,6 @@ email report.
   (simple client-rendered dropdowns) vs `buscar_opcion_select_lectura`
   (AJAX-backed dropdowns like `usuario_lectura`, needs debounced search +
   stale-element retries). Don't use the simple one on an AJAX field.
-- `alpha.py` is a legacy monolithic prototype predating the `modules/` split.
-  Not imported by `main.py` — dead code kept for reference, not a second
-  entry point.
 
 ### CEMDE is a moving target — treat "no such element" as a UI-change signal first
 
