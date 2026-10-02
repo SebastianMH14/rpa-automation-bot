@@ -151,8 +151,8 @@ el AJAX sobre un campo simple funciona pero es innecesariamente más lento.
 
 ### 6.4 Compuerta de envío de correo
 
-El envío del reporte por correo (actualmente orquestado desde `main.py`, ver
-nota en §9) solo debe dispararse cuando una corrida está genuinamente limpia:
+El envío del reporte por correo, orquestado al final de `main.py`, solo debe
+dispararse cuando una corrida está genuinamente limpia:
 
 ```python
 corrida_limpia = (
@@ -208,11 +208,6 @@ CEMDE, no de los datos.
 
 ## 9. Deuda técnica conocida
 
-- El envío de correo condicionado a "corrida limpia" (§6.4) vive, al momento
-  de escribir esto, en un script runner separado usado para pruebas
-  manuales — no está aplicado dentro de `main.py` todavía. Antes de confiar
-  en la ejecución desatendida de las 4 AM, confirmar que `main.py` tiene esta
-  misma lógica y no el simple `if fallidos == 0` original.
 - No hay suite de tests. Toda validación de cambios se hace corriendo el
   flujo contra CEMDE/Sentinel reales (ver `CLAUDE.md`).
 - `alpha.py` es código muerto; candidato a eliminar o mover a una carpeta

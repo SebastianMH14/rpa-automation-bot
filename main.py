@@ -48,13 +48,38 @@ def main() -> int:
     logger.info("=" * 60)
 
     # ── ENVÍO DE REPORTE POR CORREO ────────────────────────────────────────
-    try:
-        reporte.enviar_email(ruta_reporte)
-        logger.info("📧 Reporte enviado por correo correctamente")
-    except Exception as e:
-        logger.error("📧 No se pudo enviar el reporte por correo: %s", e)
+    # Solo se envía si la corrida terminó realmente limpia: sin fallidos,
+    # sin aborto por circuit breaker (un aborto deja fallidos == 0 para los
+    # registros nunca intentados, así que esa comparación sola no alcanza) y
+    # con todos los PDFs contabilizados en alguna categoría.
+    corrida_limpia = (
+        fallidos == 0
+        and not reporte.abortado_por
+        and exitosos + rechazados + procesados == len(pdfs)
+    )
 
-    return 0 if fallidos == 0 else 1
+    if corrida_limpia:
+        logger.info("✅ Corrida limpia (0 fallidos, sin abortos, todo procesado) — enviando correo de reporte")
+        try:
+            reporte.enviar_email(ruta_reporte)
+            logger.info("📧 Reporte enviado por correo correctamente")
+        except Exception as e:
+            logger.error("📧 No se pudo enviar el reporte por correo: %s", e)
+    elif reporte.abortado_por:
+        logger.warning(
+            "🚫 Correo SUPRIMIDO — proceso abortado por fallos sistemáticos "
+            "(%d/%d registros nunca se intentaron). Motivo: %s",
+            len(pdfs) - (exitosos + rechazados + procesados + fallidos),
+            len(pdfs), reporte.abortado_por,
+        )
+    else:
+        logger.warning(
+            "🚫 Correo SUPRIMIDO — quedan %d fallidos pendientes de corregir. "
+            "Se enviará solo cuando una corrida termine con 0 fallidos y sin abortos.",
+            fallidos,
+        )
+
+    return 0 if corrida_limpia else 1
 
 
 if __name__ == "__main__":
