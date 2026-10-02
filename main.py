@@ -48,15 +48,10 @@ def main() -> int:
     logger.info("=" * 60)
 
     # ── ENVÍO DE REPORTE POR CORREO ────────────────────────────────────────
-    # Solo se envía si la corrida terminó realmente limpia: sin fallidos,
-    # sin aborto por circuit breaker (un aborto deja fallidos == 0 para los
-    # registros nunca intentados, así que esa comparación sola no alcanza) y
-    # con todos los PDFs contabilizados en alguna categoría.
-    corrida_limpia = (
-        fallidos == 0
-        and not reporte.abortado_por
-        and exitosos + rechazados + procesados == len(pdfs)
-    )
+    # Solo se envía si la corrida terminó realmente limpia (ver
+    # UploadReport.corrida_limpia): sin fallidos, sin aborto por circuit
+    # breaker y con todos los PDFs contabilizados en alguna categoría.
+    corrida_limpia = reporte.corrida_limpia(len(pdfs))
 
     if corrida_limpia:
         logger.info("✅ Corrida limpia (0 fallidos, sin abortos, todo procesado) — enviando correo de reporte")

@@ -28,6 +28,28 @@ class UploadReport:
         correo mirando solo `fallidos`; también debe chequear esto."""
         return self._abortado_por
 
+    def corrida_limpia(self, total: int) -> bool:
+        """
+        True solo si la corrida terminó genuinamente limpia: sin fallidos,
+        sin aborto por circuit breaker, y con los `total` PDFs esperados
+        contabilizados en alguna categoría (exitoso/rechazado/ya procesado).
+
+        Las tres condiciones son necesarias — en particular, un aborto por
+        fallos sistemáticos deja `_fallidos` vacío (los registros nunca
+        intentados no se contabilizan como fallidos), así que mirar solo
+        `len(self._fallidos) == 0` da un falso positivo y dispara el envío
+        de correo sobre una corrida que en realidad no subió casi nada.
+
+        Args:
+            total: cantidad total de PDFs que la corrida debía procesar
+                   (`len(pdfs)` en el llamador).
+        """
+        return (
+            len(self._fallidos) == 0
+            and not self._abortado_por
+            and len(self._exitosos) + len(self._rechazados) + len(self._procesados) == total
+        )
+
     def ok(self, pdf: dict) -> None:
         """Registra un PDF subido correctamente."""
         self._exitosos.append(pdf["nombre"])

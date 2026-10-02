@@ -206,10 +206,25 @@ rompiendo el 100% de las subidas hasta que se diagnosticó en vivo:
 registros en el mismo paso, sospechar primero de un cambio de interfaz en
 CEMDE, no de los datos.
 
-## 9. Deuda técnica conocida
+## 9. Tests
 
-- No hay suite de tests. Toda validación de cambios se hace corriendo el
-  flujo contra CEMDE/Sentinel reales (ver `CLAUDE.md`).
+`tests/` (pytest, `requirements-dev.txt`) cubre deliberadamente solo la lógica
+pura, sin Selenium: `utils/fecha.py`, los helpers de normalización de nombre
+de `utils/select2.py`, y `UploadReport` — en particular `corrida_limpia()`,
+con un test de regresión explícito para el bug real que motivó extraer ese
+método (un aborto por circuit breaker deja `fallidos == 0`, lo que antes
+disparaba el envío de correo sobre una corrida que en los hechos no subió
+casi nada; ver §6.4).
+
+Todo lo que depende del DOM real de Sentinel/CEMDE (`modules/sentinel/`,
+`modules/cemde/`) queda **deliberadamente fuera** de la suite: un mock de
+Selenium ahí no habría detectado ninguno de los incidentes de §8, porque esos
+incidentes eran cambios reales en el HTML de CEMDE, no errores de lógica. Esa
+parte del código solo se valida corriendo el flujo completo contra los
+sistemas reales.
+
+## 10. Deuda técnica conocida
+
 - `alpha.py` es código muerto; candidato a eliminar o mover a una carpeta
   `legacy/`.
 - La descarga de PDF (`modules/sentinel/pdf_downloader.py`) usa
@@ -217,7 +232,7 @@ CEMDE, no de los datos.
   aceptado porque CEMDE se accede por IP directa, pero vale la pena
   revisarlo si eso cambia.
 
-## 10. Datos sensibles
+## 11. Datos sensibles
 
 `pdfs_descargados/` y `logs/` contienen información de salud real de
 pacientes (nombres, cédulas, diagnósticos) en texto plano / PDFs sin cifrar.

@@ -5,13 +5,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-pip install -r requirements.txt   # install dependencies
-python main.py                    # run the full bot end-to-end (opens a visible Edge window)
+pip install -r requirements.txt       # install runtime dependencies
+pip install -r requirements-dev.txt   # + pytest, for tests
+python main.py                        # run the full bot end-to-end (opens a visible Edge window)
+python -m pytest                      # run the unit test suite
+python -m pytest tests/test_fecha.py -k test_acepta_formato_iso  # a single test
 ```
 
-There is no test suite, linter, or build step in this repository — it's a plain
-Selenium automation script. `python -m py_compile <file>` is the fastest sanity
-check after an edit (catches syntax errors without launching a browser).
+There is no linter or build step. There's no way to unit-test the Selenium/CEMDE
+flow itself either — that only gets validated by running against the real
+systems (see the incident history below); the test suite (`tests/`) is
+intentionally scoped to the pure, non-Selenium logic: `utils/fecha.py`,
+`utils/select2.py`'s name-normalization helpers, and `UploadReport` (including
+`corrida_limpia()`, the email-send gate — see §6.4 of `ARCHITECTURE.md`, and
+the regression test for the exact bug that method exists to prevent).
+`python -m py_compile <file>` is still the fastest sanity check for everything
+else after an edit.
 
 Required env vars (`.env`, never committed): `URL_LOGIN_SENTINEL`, `USUARIO_SENTINEL`,
 `PASSWORD_SENTINEL`, `URL_LOGIN_CEMDE`, `EMAIL_CEMDE`, `PASSWORD_CEMDE`, `URL_PACIENTES`,

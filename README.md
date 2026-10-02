@@ -37,10 +37,27 @@ venv\Scripts\activate           # Windows
 # 3. Instalar dependencias
 pip install -r requirements.txt
 
+# 3b. (opcional) Dependencias de desarrollo, para correr los tests
+pip install -r requirements-dev.txt
+
 # 4. Configurar variables de entorno
 cp .env.example .env
 # Editar .env con las credenciales reales
 ```
+
+---
+
+## Tests
+
+```bash
+python -m pytest
+```
+
+Cubre solo la lógica que no depende de Selenium ni de la interfaz real de
+Sentinel/CEMDE (parseo de fechas, normalización de nombre de firmante, y la
+condición que decide si se envía el correo de reporte). El flujo de
+automatización en sí no tiene tests automatizados — se valida corriendo el
+bot contra los sistemas reales (ver `ARCHITECTURE.md`).
 
 ---
 
