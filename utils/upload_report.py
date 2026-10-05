@@ -7,6 +7,19 @@ from email.mime.base import MIMEBase
 from email import encoders
 
 
+def _resumir_error(error: Exception | str) -> str:
+    """
+    Deja solo la primera línea útil del error. Las excepciones de Selenium
+    traen después un bloque "Stacktrace:" de frames del driver que no le
+    sirve a quien lee el reporte (el detalle completo queda en el log).
+    """
+    texto = str(error).split("Stacktrace:")[0].strip()
+    for linea in texto.splitlines():
+        if linea.strip():
+            return linea.strip()
+    return texto
+
+
 class UploadReport:
     def __init__(self):
         self._exitosos:   list[str] = []
@@ -16,16 +29,17 @@ class UploadReport:
         self._abortado_por: str | None = None
 
     def marcar_abortado(self, motivo: str) -> None:
-        """Marca el reporte como resultado de un aborto temprano por fallos
-        sistemáticos (ver `_FalloSistematico` en ayudas_diagnosticas.py)."""
-        self._abortado_por = motivo
+        """Marca el reporte como resultado de una corrida que se detuvo antes
+        de procesar todos los registros: aborto por fallos sistemáticos (ver
+        `_FalloSistematico` en ayudas_diagnosticas.py) o error fatal."""
+        self._abortado_por = _resumir_error(motivo)
 
     @property
     def abortado_por(self) -> str | None:
         """Motivo del aborto temprano, o None si la corrida no fue abortada.
         Un aborto puede dejar `fallidos == 0` (los pendientes nunca se
-        contabilizan) — por eso el llamador NO debe decidir si enviar el
-        correo mirando solo `fallidos`; también debe chequear esto."""
+        contabilizan) — por eso, para saber si la corrida salió bien, no
+        alcanza con mirar solo `fallidos`; ver `corrida_limpia`."""
         return self._abortado_por
 
     def corrida_limpia(self, total: int) -> bool:
@@ -37,8 +51,9 @@ class UploadReport:
         Las tres condiciones son necesarias — en particular, un aborto por
         fallos sistemáticos deja `_fallidos` vacío (los registros nunca
         intentados no se contabilizan como fallidos), así que mirar solo
-        `len(self._fallidos) == 0` da un falso positivo y dispara el envío
-        de correo sobre una corrida que en realidad no subió casi nada.
+        `len(self._fallidos) == 0` da un falso positivo y haría pasar por
+        exitosa una corrida que en realidad no subió casi nada. Se usa para
+        el código de salida del proceso; el correo se envía siempre.
 
         Args:
             total: cantidad total de PDFs que la corrida debía procesar
@@ -60,7 +75,7 @@ class UploadReport:
 
     def fail(self, pdf: dict, error: Exception | str) -> None:
         """Registra un PDF que falló con su error."""
-        self._fallidos.append((pdf["nombre"], str(error)))
+        self._fallidos.append((pdf["nombre"], _resumir_error(error)))
 
     def already(self, pdf: dict) -> None:
         """Registra un PDF que ya había sido procesado anteriormente."""
@@ -85,12 +100,12 @@ class UploadReport:
 
         if self._abortado_por:
             lineas.append("")
-            lineas.append("⛔ PROCESO ABORTADO POR FALLOS SISTEMÁTICOS")
+            lineas.append("⛔ PROCESO ABORTADO")
             lineas.append(f"   Motivo: {self._abortado_por}")
             lineas.append(
-                "   Se detuvo antes de agotar los reintentos para no "
-                "desperdiciar horas repitiendo el mismo fallo. Revisar "
-                "manualmente CEMDE/Sentinel antes de la próxima ejecución."
+                "   La corrida se detuvo antes de procesar todos los "
+                "registros. Revisar manualmente CEMDE/Sentinel antes de la "
+                "próxima ejecución."
             )
             lineas.append("")
         lineas.append(f"  Total procesados : {total}")
@@ -212,11 +227,10 @@ class UploadReport:
             banner_abortado = f"""
             <div style="background:#fdecea;border:1px solid #c00;color:#900;
                         padding:10px 14px;margin-bottom:16px;border-radius:4px">
-              <b>⛔ Proceso abortado por fallos sistemáticos.</b><br>
+              <b>⛔ Proceso abortado.</b><br>
               Motivo: {self._abortado_por}<br>
-              Se detuvo antes de agotar los reintentos para no desperdiciar horas
-              repitiendo el mismo fallo. Revisar manualmente CEMDE/Sentinel
-              antes de la próxima ejecución.
+              La corrida se detuvo antes de procesar todos los registros.
+              Revisar manualmente CEMDE/Sentinel antes de la próxima ejecución.
             </div>
             """
 

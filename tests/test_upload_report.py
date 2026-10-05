@@ -27,12 +27,38 @@ class TestAcumulacion:
         assert report._fallidos == [("a.pdf", "algo salió mal")]
 
 
+class TestResumenDeErrores:
+    """El reporte llega al cliente: no debe traer el Stacktrace de Selenium."""
+
+    def test_fail_descarta_el_stacktrace_del_driver(self):
+        report = UploadReport()
+        error = ("Message: no such element: Unable to locate element\n"
+                 "  (Session info: MicrosoftEdge=152.0)\n"
+                 "Stacktrace:\n\tmsedgedriver!GetHandleVerifier [0x7ff6+4ab5]")
+        report.fail(_pdf("a.pdf"), error)
+        assert report._fallidos == [
+            ("a.pdf", "Message: no such element: Unable to locate element")]
+
+    def test_fail_deja_intacto_un_error_de_una_linea(self):
+        report = UploadReport()
+        report.fail(_pdf("a.pdf"), "No se pudo seleccionar equipo HOLTER")
+        assert report._fallidos[0][1] == "No se pudo seleccionar equipo HOLTER"
+
+    def test_marcar_abortado_tambien_descarta_el_stacktrace(self):
+        report = UploadReport()
+        report.marcar_abortado("8 fallos consecutivos. Ultimo error: boom\n"
+                               "Stacktrace:\n\tmsedgedriver!x")
+        assert "Stacktrace" not in report.abortado_por
+        assert "msedgedriver" not in report.abortado_por
+
+
 class TestCorridaLimpia:
     """
-    Cubre la condición que decide si se envía el correo de reporte
-    (ver main.py y ARCHITECTURE.md §6.4). El caso de aborto con 0 fallidos
-    es regresión directa de un bug real: un correo se envió de más porque
-    la condición original solo miraba `fallidos == 0`.
+    Cubre la condición que decide si la corrida salió bien (código de
+    salida de main.py; el correo se envía siempre, ver ARCHITECTURE.md §6.4).
+    El caso de aborto con 0 fallidos es regresión directa de un bug real:
+    la condición original solo miraba `fallidos == 0` y daba por buena una
+    corrida abortada.
     """
 
     def test_todo_exitoso_es_corrida_limpia(self):
