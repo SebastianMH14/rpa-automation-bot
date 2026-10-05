@@ -11,7 +11,7 @@ Corre de forma desatendida (Windows Task Scheduler, diariamente a las 4 AM),
 sin supervisión humana durante la ejecución. Esa característica — nadie mira
 la pantalla mientras corre — es la que determina buena parte de las
 decisiones de diseño descritas más abajo (circuit breaker, deduplicación,
-compuerta de correo).
+reporte por correo siempre enviado).
 
 ## 2. Vista de sistema
 
@@ -59,8 +59,9 @@ flowchart LR
 4. `subir_pdfs` — por cada PDF, abre el paciente en CEMDE y completa el
    formulario de ayuda diagnóstica (o, si el examen está `RECHAZADO`, agrega
    una nota aclaratoria en vez de subir nada).
-5. Reporte final — se guarda siempre en `logs/reporte_<timestamp>.txt`; el
-   envío por correo está condicionado (ver §7).
+5. Reporte final — se guarda siempre en `logs/reporte_<timestamp>.txt` y se
+   envía **siempre** por correo al terminar (ver §6.4), también si no había
+   nada pendiente o si la corrida terminó con un error fatal.
 
 Todo corre en **una sola sesión de Selenium/Edge**, visible y maximizada
 (`core/driver.py`), sin headless — así se ejecutó siempre en producción y
@@ -131,8 +132,15 @@ fallar el mismo paso en el 100% de los registros, y sin este corte el bot
 corría ~4 horas sin lograr ni un solo éxito, tres veces seguidas, antes de
 darse por vencido.
 
+El corte aplica **solo a la pasada principal**. Las pasadas de reintento
+contienen únicamente registros que ya fallaron, así que una racha de fallos
+ahí es lo esperado: el 05/10/2026 los fallos de los reintentos se sumaron a la
+racha, llegaron a 8 y una corrida que había procesado 775 de 777 se reportó
+(y se envió al cliente) como "ABORTADA". Cubierto por
+`tests/test_circuit_breaker.py`.
+
 Un aborto deja `fallidos == 0` para los registros nunca intentados — por eso
-la compuerta de correo (§6.4) no puede mirar solo ese número.
+`corrida_limpia()` (§6.4) no puede mirar solo ese número.
 
 ### 6.3 Dos helpers de Select2 distintos
 
@@ -148,21 +156,35 @@ la compuerta de correo (§6.4) no puede mirar solo ese número.
 Usar el helper simple sobre un campo AJAX falla de forma intermitente; usar
 el AJAX sobre un campo simple funciona pero es innecesariamente más lento.
 
-### 6.4 Compuerta de envío de correo
+### 6.4 Reporte por correo: siempre se envía
 
-El envío del reporte por correo, orquestado al final de `main.py`, solo debe
-dispararse cuando una corrida está genuinamente limpia:
+Requisito del cliente: el correo se envía **siempre** al terminar, para que
+sepa cómo salió la corrida. `main.py` lo envía en las tres salidas posibles:
+corrida normal (limpia, con fallidos o abortada por el circuit breaker), sin
+PDFs pendientes (reporte vacío, "0 total — sin errores") y error fatal antes
+de terminar (reporte marcado como abortado, con el motivo). Si el envío
+falla, se registra en el log pero no cambia el código de salida.
+
+El asunto y el cuerpo reflejan el resultado real: `⛔ PROCESO ABORTADO` si
+hubo aborto, `⚠️ N fallido(s)` si quedaron fallidos, `✅ Sin errores` si no.
+Los errores se resumen a su primera línea (`_resumir_error`): el Stacktrace de
+Selenium queda en el log, no en el correo.
+
+`UploadReport.corrida_limpia(total)` ya no decide el envío sino el **código de
+salida** del proceso (0 solo si la corrida salió bien):
 
 ```python
-corrida_limpia = (
-    fallidos == 0
-    and not reporte.abortado_por
-    and procesados + exitosos + rechazados == len(pdfs)
-)
+fallidos == 0
+and not abortado_por
+and exitosos + rechazados + procesados == total
 ```
 
 Las tres condiciones son necesarias: `fallidos == 0` sola no alcanza porque
 un aborto temprano también la cumple (ver §6.2).
+
+**Historia**: durante el incidente de sep-oct 2026 el envío estuvo condicionado
+a `corrida_limpia`, para no enviar correos mientras se corregía el bot; con la
+corrida estable, el cliente pidió que fuera incondicional.
 
 ### 6.5 Match exacto de paciente, no por substring
 
@@ -212,8 +234,8 @@ pura, sin Selenium: `utils/fecha.py`, los helpers de normalización de nombre
 de `utils/select2.py`, y `UploadReport` — en particular `corrida_limpia()`,
 con un test de regresión explícito para el bug real que motivó extraer ese
 método (un aborto por circuit breaker deja `fallidos == 0`, lo que antes
-disparaba el envío de correo sobre una corrida que en los hechos no subió
-casi nada; ver §6.4).
+hacía pasar por buena una corrida que en los hechos no subió casi nada; ver
+§6.4), y el recorte de errores que llegan al correo (`_resumir_error`).
 
 Todo lo que depende del DOM real de Sentinel/CEMDE (`modules/sentinel/`,
 `modules/cemde/`) queda **deliberadamente fuera** de la suite: un mock de

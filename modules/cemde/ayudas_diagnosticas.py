@@ -422,8 +422,14 @@ def subir_pdfs(
         nonlocal fallos_consecutivos
         fallos_consecutivos = 0
 
-    def _registrar_fallo(motivo: str) -> None:
+    def _registrar_fallo(motivo: str, intento: int) -> None:
+        # El corte solo aplica a la pasada principal. Las pasadas de reintento
+        # contienen únicamente registros que ya fallaron, así que una racha de
+        # fallos ahí es lo esperado y no indica un problema sistemático (el
+        # 05/10 abortó por error una corrida que había procesado 775/777).
         nonlocal fallos_consecutivos
+        if intento > 1:
+            return
         fallos_consecutivos += 1
         if fallos_consecutivos >= umbral_fallos_consecutivos:
             raise _FalloSistematico(
@@ -486,7 +492,7 @@ def subir_pdfs(
                         fallidos += 1
                         motivo = "El examen esta rechazado pero no se pudo agregar la nota aclaratoria"
                         report.fail(pdf, Exception(motivo))
-                        _registrar_fallo(motivo)
+                        _registrar_fallo(motivo, intento)
                         logger.warning(
                             "⚠ No se pudo agregar nota aclaratoria | Cédula: %s | Examen: %s",
                             cedula, tipo_examen,
@@ -547,7 +553,7 @@ def subir_pdfs(
                         exc_info=True,
                     )
 
-                _registrar_fallo(error_msg)
+                _registrar_fallo(error_msg, intento)
 
         return pendientes_reintento
 

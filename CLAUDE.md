@@ -17,8 +17,9 @@ flow itself either — that only gets validated by running against the real
 systems (see the incident history below); the test suite (`tests/`) is
 intentionally scoped to the pure, non-Selenium logic: `utils/fecha.py`,
 `utils/select2.py`'s name-normalization helpers, and `UploadReport` (including
-`corrida_limpia()`, the email-send gate — see §6.4 of `ARCHITECTURE.md`, and
-the regression test for the exact bug that method exists to prevent).
+`corrida_limpia()`, which sets the process exit code — see §6.4 of
+`ARCHITECTURE.md`, and the regression test for the exact bug that method
+exists to prevent).
 `python -m py_compile <file>` is still the fastest sanity check for everything
 else after an edit.
 
@@ -97,17 +98,28 @@ forcing these selects unconditionally (as an earlier version of this code
 did) makes every ELECTROCARDIOGRAMA record fail. Confirmed live that CEMDE
 accepts the form without these fields for that exam type.
 
-### Circuit breaker and email gating in `subir_pdfs`
+### Circuit breaker and the report email
 
 `subir_pdfs` (in `ayudas_diagnosticas.py`) aborts the whole run
 (`_FalloSistematico`) after 8 consecutive failures with no success in
 between, instead of exhausting all retry passes across the full pending list
 — a systemic failure (e.g. a CEMDE UI change) previously burned hours
-repeating the identical failure hundreds of times before this existed. An
+repeating the identical failure hundreds of times before this existed. The
+breaker only counts failures in the main pass (`intento == 1`): retry passes
+only contain records that already failed, so a streak there is normal and
+used to trip it falsely (see `tests/test_circuit_breaker.py`). An
 aborted run still returns `fallidos == 0` for the records it never attempted,
-so **never gate the email report on `fallidos == 0` alone** — also check
-`report.abortado_por` and that `exitosos + rechazados + procesados == len(pdfs)`
-before sending. This logic lives in `main.py`, not in `UploadReport`.
+so don't judge whether a run went well from `fallidos` alone — use
+`UploadReport.corrida_limpia(len(pdfs))`, which also checks `abortado_por`
+and that everything was accounted for.
+
+**The client requires the report email to be sent at the end of every run,
+no matter the outcome** (clean, with failures, aborted, nothing pending, or a
+fatal error) — `main.py` does this in all exit paths. Don't reintroduce a
+condition that suppresses it; subject/body already reflect the real result.
+`corrida_limpia` only drives the exit code. Errors shown in the report are cut
+to their first line (`_resumir_error`) so Selenium stacktraces don't reach the
+client; the full detail stays in `logs/bot_log_*.txt`.
 
 ### Two independent dedup layers
 
