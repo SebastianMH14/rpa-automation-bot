@@ -8,6 +8,7 @@ from modules.sentinel.tabla import procesar_tabla_sentinel
 from modules.cemde.login import login_cemde
 from modules.cemde.ayudas_diagnosticas import subir_pdfs
 from utils.upload_report import UploadReport
+from utils.validacion_informe import verificar_dependencias
 
 logger = setup_logger("bot")
 
@@ -39,6 +40,8 @@ def main() -> int:
     driver, wait = crear_driver()
 
     try:
+        verificar_dependencias()
+
         # ── SENTINEL ──────────────────────────────────────────────────────
         login_sentinel(driver, wait)
         pdfs = procesar_tabla_sentinel(driver, wait)

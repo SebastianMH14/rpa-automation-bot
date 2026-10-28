@@ -16,10 +16,13 @@ There is no linter or build step. There's no way to unit-test the Selenium/CEMDE
 flow itself either — that only gets validated by running against the real
 systems (see the incident history below); the test suite (`tests/`) is
 intentionally scoped to the pure, non-Selenium logic: `utils/fecha.py`,
-`utils/select2.py`'s name-normalization helpers, and `UploadReport` (including
+`utils/select2.py`'s name-normalization helpers, `utils/validacion_informe.py`
+(report-belongs-to-patient check, see below), `UploadReport` (including
 `corrida_limpia()`, which sets the process exit code — see §6.4 of
 `ARCHITECTURE.md`, and the regression test for the exact bug that method
-exists to prevent).
+exists to prevent), and `subir_pdfs` against a simulated CEMDE
+(`tests/conftest.py::cemde_simulado` monkeypatches the Selenium-facing
+functions) for the circuit breaker and discarded-report handling.
 `python -m py_compile <file>` is still the fastest sanity check for everything
 else after an edit.
 
@@ -128,6 +131,36 @@ is skipped on the Sentinel side (`modules/sentinel/tabla.py`), but is still
 attempted on the CEMDE side — `_abrir_formulario_otros_ad` separately checks
 whether that exam/date is already loaded in CEMDE and skips only then. Don't
 assume a locally-present PDF means it was already uploaded.
+
+### Sentinel sometimes serves another patient's report — validate before uploading
+
+On 24/10/2026 the bot was found to have attached one patient's ECG to another
+patient's chart (9 wrong PDFs among 8,863 audited; 3 reached CEMDE). Sentinel
+returned the wrong report when a grid row was visited more than once in a run.
+The cause on Sentinel's side is not known, so `modules/sentinel/tabla.py`
+protects against the effect (logic in `utils/validacion_informe.py`, §6.6 of
+`ARCHITECTURE.md`):
+
+- Each row (`cédula`, exam, date) is visited **once per run** (`registrar_visita`);
+  repeats are skipped.
+- For CONFIRMADO/RECONFIRMADO rows, the "Revisar informe - NOMBRE (ID)" header
+  is checked right after opening the report, and the downloaded PDF (also a
+  PDF already on disk, before reusing it) must carry the row's `ID paciente`,
+  or at least 3 of the name's words. RECHAZADO rows are **not** validated —
+  their PDF can be a blank template and is never uploaded.
+- A report that fails goes to `pdfs_descargados/_DESCARTADOS/` (never deleted;
+  the folder is excluded from the on-disk dedup index) and is passed on to
+  `subir_pdfs` as an entry with an `"invalido"` key: it is reported as a failure
+  with the reason, never opens the patient in CEMDE, is not retried, and does
+  not count for the circuit breaker. An unreadable PDF fails closed.
+- The validation needs `pypdf` (in `requirements.txt`, imported lazily).
+  `main.py` calls `verificar_dependencias()` first thing, so a machine missing
+  it fails fast (fatal-error email, exit 1) instead of treating every PDF as
+  unreadable and moving them all to `_DESCARTADOS`. After pulling this change
+  run `pip install -r requirements.txt`.
+
+Don't loosen the match to a single surname: two relatives share it and the
+ID check exists precisely because names alone are ambiguous.
 
 ### Business logic lives in `config/settings.py`
 

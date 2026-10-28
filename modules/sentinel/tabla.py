@@ -1,6 +1,7 @@
 from datetime import datetime
 import logging
 import os
+import shutil
 import time
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
@@ -14,7 +15,17 @@ from config.settings import (
 
 )
 from modules.sentinel.pdf_downloader import descargar_pdf_desde_iframe
+from utils.validacion_informe import (
+    encabezado_corresponde,
+    parsear_encabezado,
+    registrar_visita,
+    validar_pdf,
+)
 logger = logging.getLogger("bot")
+
+# Carpeta (dentro de DOWNLOAD_DIR) donde se aparta, sin borrarlo, un PDF que
+# no corresponde al paciente. Se excluye del índice de PDFs existentes.
+CARPETA_DESCARTADOS = "_DESCARTADOS"
 
 if FECHA_LIMITE:
     try:
@@ -27,7 +38,8 @@ if FECHA_LIMITE:
 # Así se distinguen el mismo examen en fechas distintas para un mismo paciente.
 pdfs_existentes = {}
 
-for root, _, files in os.walk(DOWNLOAD_DIR):
+for root, dirs, files in os.walk(DOWNLOAD_DIR):
+    dirs[:] = [d for d in dirs if d != CARPETA_DESCARTADOS]
     for file in files:
         fecha_dir = os.path.basename(root)  # carpeta inmediata = YYYY-MM-DD
         clave = f"{fecha_dir}/{file}"
@@ -57,6 +69,44 @@ def _obtener_firmante(driver) -> str | None:
             logger.info("✅ Firmante: %s (decisión: %s)", firmante, decision)
             return firmante
     return None
+
+
+def _descartar_pdf(ruta_pdf: str) -> None:
+    """Aparta un PDF que no corresponde al paciente, para que no se vuelva a
+    subir ni cuente como ya descargado. Se conserva como evidencia."""
+    destino_dir = os.path.join(DOWNLOAD_DIR, CARPETA_DESCARTADOS)
+    os.makedirs(destino_dir, exist_ok=True)
+    sello = datetime.now().strftime("%Y%m%d_%H%M%S")
+    destino = os.path.join(
+        destino_dir, f"{sello}_{os.path.basename(ruta_pdf)}")
+    shutil.move(ruta_pdf, destino)
+    logger.warning("🗑 PDF apartado en %s", destino)
+
+
+def _leer_encabezado_informe(driver) -> tuple[str, str] | None:
+    """('NOMBRE', 'ID') de 'Revisar informe - NOMBRE (ID)', o None si la
+    pantalla no lo muestra con ese formato."""
+    for el in driver.find_elements(
+            By.XPATH, "//*[contains(text(),'Revisar informe')]"):
+        encabezado = parsear_encabezado(el.text or "")
+        if encabezado:
+            return encabezado
+    return None
+
+
+def _informe_invalido(cedula, nombre, nombre_archivo, fecha_atencion,
+                      examen, estado, motivo) -> dict:
+    """Entrada para `subir_pdfs`: no se procesa, se registra como fallida."""
+    return {
+        "ruta": None,
+        "nombre": nombre_archivo,
+        "cedula": cedula,
+        "examen": examen,
+        "fecha_atencion": fecha_atencion,
+        "estado": estado,
+        "firmante": None,
+        "invalido": f"Informe descartado, no se sube a CEMDE: {motivo}",
+    }
 
 
 def _firmante_desde_ruta(ruta_pdf: str) -> str | None:
@@ -162,6 +212,7 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
     pdfs: list[dict] = []
     total_omitidas = 0
     pagina = 1
+    visitados: set = set()
 
     modo_una_sola = cedula_filtro is not None
 
@@ -234,6 +285,16 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                         return pdfs
                     continue
 
+                # Sentinel repite filas entre páginas. Visitar de nuevo un
+                # examen en la misma corrida es lo que ha devuelto informes de
+                # otra persona (incidente 24/10/2026): se omite la repetición.
+                if registrar_visita(visitados, cedula, examen, fecha_atencion):
+                    logger.info(
+                        "🔁 Fila repetida en esta corrida, se omite: %s | %s | %s",
+                        nombre, cedula, fecha_atencion)
+                    total_omitidas += 1
+                    continue
+
                 nombre_archivo = f"{cedula}_{nombre}_{examen}".replace(
                     " ", "_") + ".pdf"
 
@@ -249,24 +310,39 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                 if clave_dedup in pdfs_existentes:
                     ruta_pdf = pdfs_existentes[clave_dedup]
 
-                    firmante = _firmante_desde_ruta(ruta_pdf)
+                    # Un PDF ya guardado pudo bajarse mal en una corrida
+                    # anterior: se comprueba antes de reutilizarlo. Los
+                    # rechazados no se suben, así que no se validan.
+                    reutilizable = True
+                    if estado in ("CONFIRMADO", "RECONFIRMADO"):
+                        valido, motivo = validar_pdf(ruta_pdf, cedula, nombre)
+                        if not valido:
+                            reutilizable = False
+                            logger.error(
+                                "❌ PDF existente descartado: %s | %s | %s",
+                                nombre_archivo, ruta_pdf, motivo)
+                            _descartar_pdf(ruta_pdf)
+                            del pdfs_existentes[clave_dedup]
 
-                    logger.info("⏭ PDF ya existe, se omite descarga: %s (firmante: %s)",
-                                nombre_archivo, firmante or "desconocido")
-                    pdfs.append({
-                        "ruta": ruta_pdf,
-                        "nombre": nombre_archivo,
-                        "cedula": cedula,
-                        "examen": examen,
-                        "fecha_atencion": fecha_atencion,
-                        "estado": estado,
-                        "firmante": firmante,   # ← NUEVO
-                    })
+                    if reutilizable:
+                        firmante = _firmante_desde_ruta(ruta_pdf)
 
-                    if modo_una_sola:
-                        return pdfs
+                        logger.info("⏭ PDF ya existe, se omite descarga: %s (firmante: %s)",
+                                    nombre_archivo, firmante or "desconocido")
+                        pdfs.append({
+                            "ruta": ruta_pdf,
+                            "nombre": nombre_archivo,
+                            "cedula": cedula,
+                            "examen": examen,
+                            "fecha_atencion": fecha_atencion,
+                            "estado": estado,
+                            "firmante": firmante,   # ← NUEVO
+                        })
 
-                    continue
+                        if modo_una_sola:
+                            return pdfs
+
+                        continue
 
                 # =========================
                 # 🔽 PROCESAMIENTO
@@ -286,6 +362,25 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                     (By.XPATH, "//*[contains(text(),'Revisar informe')]")))
 
                 time.sleep(2)
+
+                # El informe abierto debe ser el de la fila. Si el encabezado
+                # "Revisar informe - NOMBRE (ID)" muestra a otra persona, no
+                # se descarga. Si no se puede leer, queda la comprobación del PDF.
+                encabezado = _leer_encabezado_informe(driver)
+                if (encabezado and estado in ("CONFIRMADO", "RECONFIRMADO")):
+                    valido, motivo = encabezado_corresponde(
+                        cedula, nombre, encabezado[0], encabezado[1])
+                    if not valido:
+                        logger.error(
+                            "❌ Informe equivocado en pantalla para %s | %s: %s",
+                            nombre, cedula, motivo)
+                        pdfs.append(_informe_invalido(
+                            cedula, nombre, nombre_archivo, fecha_atencion,
+                            examen, estado, motivo))
+                        driver.back()
+                        wait.until(EC.presence_of_element_located(
+                            (By.XPATH, "//rows/row")))
+                        continue
 
                 firmante = _obtener_firmante(driver)
 
@@ -308,6 +403,22 @@ def _procesar_paginas(driver, wait, cedula_filtro: str | None = None) -> list[di
                     wait.until(EC.presence_of_element_located(
                         (By.XPATH, "//rows/row")))
                     continue
+
+                # Última barrera: el PDF descargado debe ser del paciente.
+                if estado in ("CONFIRMADO", "RECONFIRMADO"):
+                    valido, motivo = validar_pdf(ruta_pdf, cedula, nombre)
+                    if not valido:
+                        logger.error(
+                            "❌ PDF descargado descartado para %s | %s: %s",
+                            nombre, cedula, motivo)
+                        _descartar_pdf(ruta_pdf)
+                        pdfs.append(_informe_invalido(
+                            cedula, nombre, nombre_archivo, fecha_atencion,
+                            examen, estado, motivo))
+                        driver.back()
+                        wait.until(EC.presence_of_element_located(
+                            (By.XPATH, "//rows/row")))
+                        continue
 
                 pdfs.append({
                     "ruta": ruta_pdf,

@@ -454,6 +454,18 @@ def subir_pdfs(
             estado = pdf.get("estado", "CONFIRMADO")
             firmante = pdf.get("firmante", None)
 
+            # Informe que Sentinel entregó para otro paciente (ver
+            # modules/sentinel/tabla.py): no se toca CEMDE, se reporta como
+            # fallido. No se reintenta ni cuenta para el circuit breaker; en la
+            # próxima corrida se vuelve a intentar desde cero.
+            if pdf.get("invalido"):
+                fallidos += 1
+                report.fail(pdf, pdf["invalido"])
+                logger.error(
+                    "❌ No se sube %s | Cédula: %s | %s",
+                    pdf["nombre"], cedula, pdf["invalido"])
+                continue
+
             prefijo = f"[Intento {intento}]" if intento > 1 else ""
             logger.info("─" * 50)
             logger.info(

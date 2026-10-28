@@ -85,6 +85,7 @@ cambiarlo no se ha validado.
 | `utils/fecha.py` | Conversión entre formatos de fecha de Sentinel/CEMDE |
 | `utils/radio.py` | Marcado de radio buttons estilizados con iCheck (3 estrategias de fallback) |
 | `utils/upload_report.py` | Acumula resultados (`UploadReport`), genera el `.txt` y arma/envía el correo HTML |
+| `utils/validacion_informe.py` | Comprueba que un informe sea del paciente de la fila (ID/nombre en el PDF y en el encabezado de Sentinel) y registra las visitas repetidas (ver §6.6) |
 
 ## 5. Modelo de datos en memoria
 
@@ -195,6 +196,39 @@ un caso real donde un documento de 11 dígitos contenía como substring la
 cédula de 10 dígitos buscada — un match por substring habría abierto el
 historial clínico de otro paciente.
 
+### 6.6 El informe descargado debe ser del paciente de la fila
+
+Sentinel a veces entrega el informe de **otra persona** al abrir una fila, y el
+bot lo guardaba con el nombre del paciente de la fila y lo subía a CEMDE
+(incidente del 24/10/2026, §8). Dos protecciones, en `modules/sentinel/tabla.py`
+con la lógica pura en `utils/validacion_informe.py`:
+
+1. **Validación del informe** (solo exámenes `CONFIRMADO`/`RECONFIRMADO`;
+   los `RECHAZADO` no se suben y su informe puede ser una plantilla vacía):
+   - Pantalla "Revisar informe - NOMBRE (ID)": si muestra a otra persona, no
+     se descarga.
+   - PDF descargado: se lee su `ID paciente:` y debe coincidir con la cédula
+     de la fila. Si el ID está mal digitado en Sentinel (pasa: `3528179` vs
+     `358179`), basta que aparezcan al menos 3 palabras del nombre (o todas, si
+     el nombre es corto). Un apellido en común no alcanza.
+   - Lo mismo se aplica a un PDF que ya estaba en disco antes de reutilizarlo,
+     así un archivo mal descargado en una corrida anterior no se sube después.
+   - Un informe que no pasa se aparta (no se borra) en
+     `pdfs_descargados/_DESCARTADOS/`, no se sube, y aparece en el reporte
+     como fallido con el motivo. Si el PDF no se puede leer, también se
+     descarta: es preferible reintentar mañana a subir algo sin comprobar.
+     La falta de `pypdf` no cuenta como PDF ilegible: `main.py` la comprueba
+     al arrancar (`verificar_dependencias`) y aborta con el correo de error
+     fatal, para no apartar todos los PDFs por una dependencia sin instalar.
+2. **Una sola visita por examen y corrida**: Sentinel repite filas entre
+   páginas (10 de 20 en un caso), y en las visitas repetidas es donde aparecían
+   los informes ajenos (7 de los 121 exámenes visitados 2+ veces, contra 2 de
+   8.776 visitados una vez). `registrar_visita` omite la repetición.
+
+El motivo por el que Sentinel entrega el informe equivocado en una visita
+repetida **no está determinado**; las protecciones cierran el efecto, no la
+causa. `tests/test_validacion_informe.py` usa textos de los informes reales.
+
 ## 7. Resiliencia y reintentos
 
 `subir_pdfs` reintenta cada registro fallido hasta `max_reintentos` veces
@@ -222,6 +256,12 @@ rompiendo el 100% de las subidas hasta que se diagnosticó en vivo:
    demasiado pronto hacía perder notas válidas de HOLTER/MAPA. Ambos se
    corrigieron y se agregó el circuit breaker (§6.2) para que un incidente
    similar futuro se detecte en minutos, no en horas.
+3. **24 oct 2026** — se descubrió que el bot había subido a CEMDE el ECG de un
+   paciente en la historia de otro (Rincón ← Ortega). La auditoría de todos los
+   PDFs descargados (8.863) encontró 9 informes de otra persona; 3 llegaron a
+   historias clínicas (11/10, 13/10 y 24/10). Causa: ninguna verificación de que
+   el informe fuera del paciente, y visitas repetidas a la misma fila. Se
+   agregaron las protecciones de §6.6.
 
 **Lección operativa**: si una corrida empieza a fallar el 100% de los
 registros en el mismo paso, sospechar primero de un cambio de interfaz en
@@ -236,6 +276,10 @@ con un test de regresión explícito para el bug real que motivó extraer ese
 método (un aborto por circuit breaker deja `fallidos == 0`, lo que antes
 hacía pasar por buena una corrida que en los hechos no subió casi nada; ver
 §6.4), y el recorte de errores que llegan al correo (`_resumir_error`).
+También cubre la validación de informes (`utils/validacion_informe.py`, §6.6,
+con textos de los informes reales del incidente) y cómo `subir_pdfs` trata un
+informe descartado: se reporta como fallido y nunca se abre el paciente en
+CEMDE. Esas pruebas de `subir_pdfs` usan un CEMDE simulado (`tests/conftest.py`).
 
 Todo lo que depende del DOM real de Sentinel/CEMDE (`modules/sentinel/`,
 `modules/cemde/`) queda **deliberadamente fuera** de la suite: un mock de

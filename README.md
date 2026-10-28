@@ -54,8 +54,10 @@ python -m pytest
 ```
 
 Cubre solo la lógica que no depende de Selenium ni de la interfaz real de
-Sentinel/CEMDE (parseo de fechas, normalización de nombre de firmante, y el
-armado del reporte que se envía por correo). El flujo de
+Sentinel/CEMDE (parseo de fechas, normalización de nombre de firmante, el
+armado del reporte que se envía por correo, la validación de que un informe
+sea del paciente de la fila, y el circuito de corte de `subir_pdfs` contra un
+CEMDE simulado). El flujo de
 automatización en sí no tiene tests automatizados — se valida corriendo el
 bot contra los sistemas reales (ver `ARCHITECTURE.md`).
 
@@ -152,7 +154,11 @@ bot_sentinel_cemde/
 ├── utils/
 │   ├── select2.py                   # Helper para desplegables Select2
 │   ├── fecha.py                     # Conversión y parseo de fechas
-│   └── radio.py                     # Marcado de radio buttons con iCheck
+│   ├── radio.py                     # Marcado de radio buttons con iCheck
+│   ├── upload_report.py             # Reporte de la corrida y correo
+│   └── validacion_informe.py        # Verifica que el informe sea del paciente de la fila
+│
+├── tests/                           # Pruebas unitarias (pytest)
 │
 ├── logs/                            # Generado automáticamente
 └── pdfs_descargados/                # Generado automáticamente
